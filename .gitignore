@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.tmp*
+*.log
+*.db*
+.venv/
+venv/
+.env
+mediahub.env
+secrets.json
+*.xml
+*.zip
+*.tar.gz
+.idea/
+.vscode/
