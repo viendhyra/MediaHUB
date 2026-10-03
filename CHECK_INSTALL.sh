@@ -11,7 +11,12 @@ if systemctl is-active --quiet mediahub.service; then ok 'mediahub.service activ
 if systemctl is-enabled --quiet mediahub.service; then ok 'mediahub.service enabled'; else warn 'mediahub.service not enabled'; fi
 
 printf '\nOptional media stack:\n'
-for svc in qbittorrent-nox.service radarr.service sonarr.service prowlarr.service; do
+# qBittorrent мог быть установлен вручную под другим именем службы.
+QBIT_UNIT=qbittorrent-nox.service
+for unit in qbittorrent-nox.service qbittorrent.service; do
+  if systemctl is-active --quiet "$unit"; then QBIT_UNIT=$unit; break; fi
+done
+for svc in "$QBIT_UNIT" radarr.service sonarr.service prowlarr.service; do
   if systemctl list-unit-files "$svc" --no-legend 2>/dev/null | grep -q .; then
     if systemctl is-active --quiet "$svc"; then ok "$svc installed + active"; else warn "$svc installed but stopped"; fi
   else

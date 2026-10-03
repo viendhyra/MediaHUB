@@ -236,7 +236,7 @@ path=os.environ.get('MEDIAHUB_CACHE_DB','/var/lib/mediahub/cache.db')
 if os.path.exists(path):
     con=sqlite3.connect(path)
     try:
-        con.execute("delete from source_state where source in ('AniList new','AniList popular','AniList upcoming','TMDB movies trending','TMDB tv trending','TMDB anime trending','TMDB anime upcoming')")
+        con.execute("delete from source_state where source in ('AniList new','AniList popular','AniList upcoming','TMDB movies trending','TMDB tv trending','TMDB anime trending','TMDB anime upcoming','Jellyfin metadata')")
         con.execute("delete from catalog where mode in ('trending','upcoming')")
         con.commit()
     finally:

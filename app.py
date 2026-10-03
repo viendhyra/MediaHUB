@@ -312,7 +312,7 @@ def formats_summary(counts):
     return ", ".join(labels[:3])+("…" if len(labels)>3 else ""),worst,bad
 
 MANAGED_SERVICES = {
-    "qbittorrent": "qbittorrent-nox.service",
+    "qbittorrent": "qbittorrent-nox.service",  # заменяется настоящей службой в managed_services()
     "radarr": "radarr.service",
     "sonarr": "sonarr.service",
     "prowlarr": "prowlarr.service",
@@ -327,6 +327,15 @@ STARTUP_SERVICES = [
     "sonarr.service","prowlarr.service","mediahub-cache.timer",
     "mediahub-local-cache.timer","mediahub-organizer.timer"
 ]
+
+def managed_services():
+    """Службы для страницы «Сервисы»; qBittorrent мог быть установлен под другим именем."""
+    return {**MANAGED_SERVICES,"qbittorrent":__import__("system_setup").qbit_unit()}
+
+def startup_services():
+    """Службы «Запустить стек» с настоящим именем службы qBittorrent."""
+    qbit=__import__("system_setup").qbit_unit()
+    return [qbit if svc=="qbittorrent-nox.service" else svc for svc in STARTUP_SERVICES]
 
 def xml_key(paths):
     for p in paths:
@@ -2776,7 +2785,7 @@ async def preferences_save(
 @app.get("/api/status")
 async def status():
     svcs=[{"key":"mediahub","service":"mediahub.service","installed":True,"active":systemctl_active("mediahub.service"),"enabled":systemctl_enabled("mediahub.service")}]
-    for key,svc in MANAGED_SERVICES.items():
+    for key,svc in managed_services().items():
         svcs.append({"key":key,"service":svc,"installed":unit_available(svc),"active":systemctl_active(svc),"enabled":systemctl_enabled(svc)})
     stamp=None
     with cache_db() as con:
@@ -2795,7 +2804,7 @@ async def system_health():
         disk={"total":0,"used":0,"free":0,"percent":0}
     mt,mu=_meminfo()
     services=[]
-    for key,svc in {"mediahub":"mediahub.service",**MANAGED_SERVICES}.items():
+    for key,svc in {"mediahub":"mediahub.service",**managed_services()}.items():
         services.append({"key":key,"active":systemctl_active(svc)})
     try:db_size=CACHE_DB.stat().st_size
     except Exception:db_size=0
@@ -3067,7 +3076,7 @@ async def jellyfin_resume(request:Request,limit:int=Query(18,ge=1,le=50)):
 @app.post("/api/service")
 async def service_action(key:str=Form(...),action:str=Form(...)):
     if key=="mediahub": raise HTTPException(400,"MediaHub нельзя остановить из собственного интерфейса")
-    svc=MANAGED_SERVICES.get(key)
+    svc=managed_services().get(key)
     if not svc: raise HTTPException(404,"Неизвестный сервис")
     if not unit_available(svc): raise HTTPException(409,"Сервис ещё не установлен. Открой раздел Установка системы")
     p=run_systemctl(action,svc)
@@ -3078,7 +3087,7 @@ async def service_action(key:str=Form(...),action:str=Form(...)):
 async def service_logs(key:str=Query(...),lines:int=Query(80,ge=10,le=400)):
     """Last journal lines of one managed unit, so a failure can be read from
     the MediaHub page instead of an SSH session."""
-    svc="mediahub.service" if key=="mediahub" else MANAGED_SERVICES.get(key)
+    svc="mediahub.service" if key=="mediahub" else managed_services().get(key)
     if not svc:
         raise HTTPException(404,"Неизвестный сервис")
     try:
@@ -3094,7 +3103,7 @@ async def service_logs(key:str=Query(...),lines:int=Query(80,ge=10,le=400)):
 @app.post("/api/start-stack")
 async def start_stack():
     out=[]
-    for svc in STARTUP_SERVICES:
+    for svc in startup_services():
         if not unit_available(svc):
             out.append({"service":svc,"ok":True,"skipped":True})
             continue
@@ -9006,11 +9015,10 @@ async def download_action(hashes:str=Form(...),action:str=Form(...)):
             r=await c.post(QBIT_URL+"/api/v2/torrents/delete",
                            data={"hashes":hashes,"deleteFiles":"true" if action=="delete-files" else "false"})
         elif action in {"pause","resume"}:
-            r=await c.post(QBIT_URL+f"/api/v2/torrents/{action}",data={"hashes":hashes})
+            # qBittorrent 5.x переименовал pause/resume в stop/start; старые имена — для 4.x.
+            r=await c.post(QBIT_URL+"/api/v2/torrents/"+{"pause":"stop","resume":"start"}[action],data={"hashes":hashes})
             if r.status_code>=400:
-                # qBittorrent 5.x renamed pause/resume to stop/start.
-                alias={"pause":"stop","resume":"start"}[action]
-                r=await c.post(QBIT_URL+f"/api/v2/torrents/{alias}",data={"hashes":hashes})
+                r=await c.post(QBIT_URL+f"/api/v2/torrents/{action}",data={"hashes":hashes})
         elif action=="recheck":
             r=await c.post(QBIT_URL+"/api/v2/torrents/recheck",data={"hashes":hashes})
         else: raise HTTPException(400,"Недоступное действие")

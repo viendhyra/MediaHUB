@@ -465,7 +465,7 @@ def _format_pool_disk(disk: str, index: int) -> Dict:
 
 def _stop_storage_consumers() -> List[str]:
     units = [
-        "jellyfin.service", "qbittorrent-nox.service", "radarr.service", "sonarr.service", "prowlarr.service",
+        "jellyfin.service", qbit_unit(), "radarr.service", "sonarr.service", "prowlarr.service",
         "mediahub-cache.timer", "mediahub-local-cache.timer", "mediahub-organizer.timer",
     ]
     active = [u for u in units if systemctl_active(u)]
@@ -627,6 +627,38 @@ def unit_exists(unit: str) -> bool:
 COMMAND_VERSIONS: Dict[tuple, str] = {}
 
 
+QBIT_UNITS = ("qbittorrent-nox.service", "qbittorrent.service")
+QBIT_UNIT_CACHE: Dict[str, object] = {}
+
+
+def qbit_unit() -> str:
+    """Служба qBittorrent на этом сервере: созданная MediaHUB, ручная qbittorrent.service или qbittorrent-nox@пользователь."""
+    if QBIT_UNIT_CACHE.get("expires", 0) > time.time():
+        return str(QBIT_UNIT_CACHE["unit"])
+    unit = _detect_qbit_unit()
+    QBIT_UNIT_CACHE.update(unit=unit, expires=time.time() + 30)
+    return unit
+
+
+def _detect_qbit_unit() -> str:
+    """Найти службу qBittorrent без кэша."""
+    candidates = list(QBIT_UNITS)
+    try:
+        p = subprocess.run(["systemctl", "list-units", "--all", "--plain", "--no-legend", "qbittorrent-nox@*.service"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+        candidates += [line.split()[0] for line in p.stdout.splitlines() if line.split()]
+    except Exception:
+        pass
+    # Работающая служба важнее созданной по умолчанию: иначе портал не видит
+    # qBittorrent, установленный вручную, и мастер ставит второй экземпляр на тот же порт.
+    for unit in candidates:
+        if systemctl_active(unit):
+            return unit
+    for unit in candidates:
+        if unit_exists(unit):
+            return unit
+    return QBIT_UNITS[0]
+
+
 def command_version(command: List[str]) -> str:
     """Версия программы; Radarr/Sonarr/Prowlarr стартуют секундами, поэтому ответ хранится до замены файла."""
     try:
@@ -667,9 +699,9 @@ def dpkg_version(package: str) -> str:
     except Exception:
         return ""
 
-def qbit_temporary_password() -> str:
+def qbit_temporary_password(unit: str = QBIT_UNITS[0]) -> str:
     try:
-        p=subprocess.run(["journalctl","-u","qbittorrent-nox.service","-b","-n","100","--no-pager"],text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=5)
+        p=subprocess.run(["journalctl","-u",unit,"-b","-n","100","--no-pager"],text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=5)
         text=p.stdout or ""
         matches=re.findall(r"temporary password[^:\n]*:\s*([^\s]+)",text,re.I)
         return matches[-1].strip() if matches else ""
@@ -730,11 +762,13 @@ def component_status() -> List[Dict]:
             enabled = installed
             detail = str(root)
         elif key == "qbittorrent":
-            installed = shutil.which("qbittorrent-nox") is not None
-            running = systemctl_active("qbittorrent-nox.service")
-            enabled = systemctl_enabled("qbittorrent-nox.service")
-            version = command_version(["qbittorrent-nox", "--version"]) if installed else ""
-            temporary_password = qbit_temporary_password() if running else ""
+            unit = qbit_unit()
+            installed = shutil.which("qbittorrent-nox") is not None or unit_exists(unit)
+            running = systemctl_active(unit)
+            enabled = systemctl_enabled(unit)
+            version = command_version(["qbittorrent-nox", "--version"]) if shutil.which("qbittorrent-nox") else ""
+            temporary_password = qbit_temporary_password(unit) if running else ""
+            detail = unit
         elif key == "jellyfin":
             installed = bool(dpkg_version("jellyfin")) or shutil.which("jellyfin") is not None
             running = systemctl_active("jellyfin.service")
@@ -814,6 +848,16 @@ def install_qbittorrent() -> None:
     install_storage()
     apt_install("qbittorrent-nox")
     ensure_media_account()
+    existing = qbit_unit()
+    if existing != QBIT_UNITS[0] and unit_exists(existing):
+        # Уже настроенный qBittorrent не дублируем: второй экземпляр не займёт порт 8080
+        # и потеряет торренты. Только даём его пользователю доступ к медиатеке и запускаем.
+        user = subprocess.run(["systemctl", "show", "-p", "User", "--value", existing], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5).stdout.strip()
+        if user and user != "root":
+            run(["usermod", "-a", "-G", "media", user], check=False)
+        run(["systemctl", "enable", "--now", existing])
+        log(f"qBittorrent уже установлен как {existing} — использую эту службу.")
+        return
     data = Path("/var/lib/qbittorrent")
     data.mkdir(parents=True, exist_ok=True)
     shutil.chown(data, user="media", group="media")
@@ -836,6 +880,7 @@ def install_qbittorrent() -> None:
     Path("/etc/systemd/system/qbittorrent-nox.service").write_text(unit)
     run(["systemctl", "daemon-reload"])
     run(["systemctl", "enable", "--now", "qbittorrent-nox.service"])
+    QBIT_UNIT_CACHE.clear()
     log("qBittorrent запущен на порту 8080. При первом входе используй временный пароль из журнала qBittorrent и затем задай постоянный пароль.")
 
 
