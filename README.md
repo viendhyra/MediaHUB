@@ -1,5 +1,7 @@
 <p align="center"><img src="docs/cover.svg" alt="MediaHUB — домашняя медиатека на всех экранах" width="100%"></p>
 
+<p align="center"><a href="https://github.com/viendhyra/MediaHUB/actions/workflows/check.yml"><img src="https://github.com/viendhyra/MediaHUB/actions/workflows/check.yml/badge.svg" alt="Проверка MediaHUB"></a></p>
+
 <p align="center"><b>Скачивайте, собирайте и смотрите свою медиатеку.</b><br>Один портал для фильмов, сериалов, аниме, загрузок и домашних устройств.</p>
 
 <p align="center"><a href="#быстрый-старт">Установить</a> · <a href="docs/INSTALL_RU.md">Инструкция</a> · <a href="docs/APPS_RU.md">ТВ и телефон</a> · <a href="docs/UPDATES_RU.md">Обновления</a> · <a href="CHANGELOG.md">Что нового</a></p>
@@ -57,7 +59,7 @@ Debian 13 скачивается из официального cloud-репоз�
 
 </details>
 
-**Настройки 22.1** — снимок локального предпросмотра. Приложение, инструкции и обновления доступны сразу; обслуживание раскрывается отдельно.
+**Новые настройки** — снимок локального предпросмотра: установленная 22.0 обнаружила опубликованную 22.1. Приложение, инструкции и обновления доступны сразу; обслуживание раскрывается отдельно.
 
 ![Настройки, APK и обновления](docs/settings-v22.jpg)
 
