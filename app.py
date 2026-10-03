@@ -3813,6 +3813,14 @@ async def library_cached(kind:str=Query("movies")):
             # persist asynchronously for the next page load
             try:upsert_live_library_item(kind,p,x.get("title"))
             except Exception:pass
+    # Папку сначала нашёл обход диска, затем её импортировал Radarr/Sonarr: в кэше две
+    # строки одного проекта. Оставляем каталожную — у неё внешние данные и ID. Дубли
+    # ломали приложение: одинаковые ключи в прокручиваемом ряду роняют интерфейс.
+    unique={}
+    for x in cached:
+        p=str(x.get("path") or "").rstrip("/") or id(x);old=unique.get(p)
+        if old is None or ((old.get("catalog") or old.get("catalog_source"))=="filesystem" and (x.get("catalog") or x.get("catalog_source"))!="filesystem"):unique[p]=x
+    cached=list(unique.values())
     cached.sort(key=lambda x:(str(x.get("added_at") or ""),str(x.get("title") or "").casefold()),reverse=True)
     schedule_library_detail_warm(kind,cached)
     return cached
