@@ -4,6 +4,10 @@ set -Eeuo pipefail
 echo 'Будет удалён пакет Jellyfin. Медиатека и её история MediaHUB сохранятся.'
 read -r -p 'Для удаления введите REMOVE-JELLYFIN: ' answer
 [[ "$answer" == REMOVE-JELLYFIN ]] || exit 0
+if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+  apt-get update -qq
+  apt-get install -y ffmpeg
+fi
 backup=/var/backups/mediahub/jellyfin-$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p "$backup"; chmod 700 "$backup"
 systemctl stop jellyfin.service 2>/dev/null || true

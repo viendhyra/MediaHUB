@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 [[ $EUID -eq 0 && -f /opt/mediahub/app.py && -f /etc/mediahub.env ]] || { echo 'Нужен root на существующем Debian MediaHUB'; exit 1; }
 apt-get update -qq
-apt-get install -y -qq git curl python3 python3-venv util-linux ca-certificates
+apt-get install -y -qq git curl python3 python3-venv util-linux ca-certificates ffmpeg
 SOURCE=$(cd "$(dirname "$0")/.." && pwd)
 COMMIT=$(git -C "$SOURCE" rev-parse HEAD)
 bash "$SOURCE/scripts/update.sh" "$COMMIT"
