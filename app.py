@@ -2309,16 +2309,25 @@ async def iso_delete(name:str):
 
 @app.get("/api/setup/status")
 async def setup_status(request:Request):
+    # Проверки запускают systemctl и сервисы с --version: в потоке, чтобы плеер и пульт не ждали.
     return {
-        "host": setup_host_info(),
+        "host": await asyncio.to_thread(setup_host_info),
         "mediaRoot": str(Path(os.getenv("MEDIA_ROOT","/mnt/media"))),
         "configuredMediaRoot": str(__import__("system_setup").media_root()),
-        "components": setup_component_status(),
+        "components": await asyncio.to_thread(setup_component_status),
         "recommended": SETUP_RECOMMENDED,
         "job": setup_read_state(),
         "localInstallAllowed": setup_request_allowed(request),
         "noPassword": True,
     }
+
+SETUP_WARM_TASKS=set()
+
+@app.on_event("startup")
+async def _warm_setup_versions():
+    """Прогреть версии сервисов в фоне: первое открытие «Настроек» не ждёт запуска .NET."""
+    task=asyncio.create_task(asyncio.to_thread(__import__("system_setup").warm_versions))
+    SETUP_WARM_TASKS.add(task);task.add_done_callback(SETUP_WARM_TASKS.discard)
 
 UPDATE_REPO="viendhyra/MediaHUB"
 UPDATE_CACHE={}
@@ -2334,22 +2343,25 @@ async def github_update_info(force=False):
     async with UPDATE_CHECK_LOCK:
         if not force and UPDATE_CACHE.get('expires',0)>time.time():return dict(UPDATE_CACHE['data'])
         result={'currentVersion':APP_VERSION,'available':False,'repository':f'https://github.com/{UPDATE_REPO}'}
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(12,connect=5),trust_env=False,follow_redirects=False) as client:
-                response=await client.get(f'https://api.github.com/repos/{UPDATE_REPO}/commits/main',headers={'Accept':'application/vnd.github+json','User-Agent':f'MediaHUB/{APP_VERSION}'})
-                response.raise_for_status();commit=response.json()['sha']
-                if not re.fullmatch('[0-9a-f]{40}',commit):raise ValueError('Некорректный ответ GitHub')
-                base=f'https://raw.githubusercontent.com/{UPDATE_REPO}/{commit}'
-                version_response=await client.get(base+'/VERSION.txt');version_response.raise_for_status()
-                version=version_response.text.strip()
-                available=update_version_tuple(version)>update_version_tuple(APP_VERSION)
-                notes_response=await client.get(base+'/CHANGELOG.md');notes_response.raise_for_status()
-                notes=notes_response.text.split('\n## ',1)[0].strip()
-                # CHANGELOG начинается с заголовка документа; показываем первую запись.
-                if '\n## ' in notes_response.text:notes='## '+notes_response.text.split('\n## ',1)[1].split('\n## ',1)[0]
-                result.update(latestVersion=version,available=available,commit=commit,notes=notes[:6000],checkedAt=time.time())
-        except Exception:
-            result['error']='Не удалось проверить GitHub. Проверьте интернет и повторите позже.'
+        # Битый IPv6 отказывает только по таймауту подключения: сначала IPv4, затем как настроено в системе.
+        for local_address in ('0.0.0.0',None):
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(12,connect=5),trust_env=False,follow_redirects=False,transport=httpx.AsyncHTTPTransport(local_address=local_address)) as client:
+                    response=await client.get(f'https://api.github.com/repos/{UPDATE_REPO}/commits/main',headers={'Accept':'application/vnd.github+json','User-Agent':f'MediaHUB/{APP_VERSION}'})
+                    response.raise_for_status();commit=response.json()['sha']
+                    if not re.fullmatch('[0-9a-f]{40}',commit):raise ValueError('Некорректный ответ GitHub')
+                    base=f'https://raw.githubusercontent.com/{UPDATE_REPO}/{commit}'
+                    version_response=await client.get(base+'/VERSION.txt');version_response.raise_for_status()
+                    version=version_response.text.strip()
+                    available=update_version_tuple(version)>update_version_tuple(APP_VERSION)
+                    notes_response=await client.get(base+'/CHANGELOG.md');notes_response.raise_for_status()
+                    notes=notes_response.text.split('\n## ',1)[0].strip()
+                    # CHANGELOG начинается с заголовка документа; показываем первую запись.
+                    if '\n## ' in notes_response.text:notes='## '+notes_response.text.split('\n## ',1)[1].split('\n## ',1)[0]
+                    result.update(latestVersion=version,available=available,commit=commit,notes=notes[:6000],checkedAt=time.time())
+                result.pop('error',None);break
+            except Exception:
+                result['error']='Не удалось проверить GitHub. Проверьте интернет и повторите позже.'
         UPDATE_CACHE.update(data=result,expires=time.time()+(60 if result.get('error') else 3600))
         return dict(result)
 
@@ -2401,6 +2413,104 @@ def apps_download():
     manifest=apps_info()
     if not manifest.get('available'):raise HTTPException(404,'APK пока не размещён на сервере')
     return FileResponse(BASE_DIR/'static'/manifest['filename'],media_type='application/vnd.android.package-archive',filename=manifest['filename'],headers={'Cache-Control':'no-store'})
+
+TV_INSTALL={'status':'idle','message':'Установка на ТВ ещё не запускалась','log':[]}
+TV_INSTALL_TASKS=set()
+# Ключ adb хранится постоянно: «Всегда разрешать» на ТВ запоминает именно его.
+TV_ADB_HOME=Path(os.getenv('MEDIAHUB_ADB_HOME','/var/lib/mediahub/adb'))
+TV_INSTALL_ERRORS={
+    'INSTALL_FAILED_UPDATE_INCOMPATIBLE':'На ТВ стоит MediaHUB с другой подписью: удалите его на ТВ и повторите.',
+    'INSTALL_FAILED_VERSION_DOWNGRADE':'На ТВ уже установлена более новая версия MediaHUB.',
+    'INSUFFICIENT_STORAGE':'На ТВ не хватает места для приложения.',
+    'INSTALL_FAILED_OLDER_SDK':'Телевизору нужен Android 7.0 или новее.',
+    'INSTALL_FAILED_USER_RESTRICTED':'ТВ запретил установку через отладку: разрешите её в «Для разработчиков».',
+}
+
+def tv_install_target(address,default_port=5555):
+    """Проверить адрес ТВ: IPv4 локальной сети и порт ADB."""
+    m=re.fullmatch(r'\s*(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?\s*',str(address or ''))
+    if not m or (default_port is None and not m.group(2)):raise ValueError('Укажите адрес как 192.168.1.50 или 192.168.1.50:5555')
+    try:ip=ipaddress.ip_address(m.group(1))
+    except ValueError:raise ValueError('Неверный IP-адрес')
+    port=int(m.group(2) or default_port)
+    if not ip.is_private or ip.is_loopback or ip.is_link_local or not 1<=port<=65535:raise ValueError('Телевизор должен быть в локальной сети')
+    return f'{ip}:{port}'
+
+async def tv_run(*command,timeout=30,env=None):
+    """Выполнить команду с ограничением времени и вернуть код и вывод."""
+    process=await asyncio.create_subprocess_exec(*command,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT,env=env)
+    try:output,_=await asyncio.wait_for(process.communicate(),timeout)
+    except asyncio.TimeoutError:
+        process.kill();await process.wait()
+        raise RuntimeError(f'{Path(command[0]).name} не ответил за {timeout} с')
+    return process.returncode,(output or b'').decode('utf-8','replace').strip()
+
+def tv_step(status,message):
+    """Записать шаг установки, который видит страница настроек."""
+    TV_INSTALL.update(status=status,message=message,updatedAt=time.time())
+    TV_INSTALL['log']=(TV_INSTALL.get('log') or [])[-30:]+[message]
+
+async def tv_install_job(target,pair_target,pair_code):
+    """Поставить APK с сервера на ТВ так же, как INSTALL_ON_DEVICE.bat: connect → разрешение → install → запуск."""
+    adb=shutil.which('adb');env=None
+    try:
+        apk=apps_info()
+        if not apk.get('available'):raise RuntimeError('На сервере нет APK. Обновите MediaHUB.')
+        if not adb:
+            tv_step('running','Устанавливаю adb на сервер…')
+            code,output=await tv_run('apt-get','install','-y','-qq','adb',timeout=600,env=dict(os.environ,DEBIAN_FRONTEND='noninteractive'))
+            adb=shutil.which('adb')
+            if code or not adb:raise RuntimeError('Не удалось установить adb: '+output[-300:])
+        TV_ADB_HOME.mkdir(parents=True,exist_ok=True);env=dict(os.environ,HOME=str(TV_ADB_HOME))
+        # Сервер adb уходит в фон и держит канал вывода: ждём только выхода клиента.
+        process=await asyncio.create_subprocess_exec(adb,'start-server',stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL,env=env)
+        await asyncio.wait_for(process.wait(),30)
+        if pair_target:
+            tv_step('running',f'Сопряжение с {pair_target}…')
+            code,output=await tv_run(adb,'pair',pair_target,pair_code,timeout=30,env=env)
+            if 'successfully paired' not in output.lower():raise RuntimeError('Сопряжение не удалось. Проверьте порт и код на экране «Подключение с кодом»: '+output[-200:])
+        tv_step('running',f'Подключаюсь к {target}…')
+        code,output=await tv_run(adb,'connect',target,timeout=20,env=env)
+        if not re.search(r'connected to|failed to authenticate',output,re.I):raise RuntimeError(f'ТВ {target} не принимает подключение отладки. Проверьте IP и включённую отладку по сети. Ответ: {output[-160:]}')
+        for attempt in range(60):
+            code,output=await tv_run(adb,'-s',target,'get-state',timeout=10,env=env)
+            if output.strip()=='device':break
+            if attempt==0:tv_step('waiting','На экране ТВ появится «Разрешить отладку?». Отметьте «Всегда разрешать с этого компьютера» и нажмите OK.')
+            # После нажатия OK на ТВ соединение нужно открыть заново.
+            await tv_run(adb,'connect',target,timeout=10,env=env);await asyncio.sleep(1)
+        else:raise RuntimeError('ТВ не дал разрешение на отладку за минуту. Подтвердите окно на экране ТВ и повторите.')
+        tv_step('running',f'Устанавливаю MediaHUB {apk["version"]} на ТВ, это займёт до минуты…')
+        code,output=await tv_run(adb,'-s',target,'install','-r',str(BASE_DIR/'static'/apk['filename']),timeout=300,env=env)
+        if 'Success' not in output:raise RuntimeError(next((text for key,text in TV_INSTALL_ERRORS.items() if key in output),'Установка не удалась: '+output[-240:]))
+        code,output=await tv_run(adb,'-s',target,'shell','monkey','-p','ru.mediahub.app','-c','android.intent.category.LEANBACK_LAUNCHER','1',timeout=20,env=env)
+        # На телефоне и планшете нет LEANBACK_LAUNCHER: запускаем обычную иконку.
+        if 'No activities found' in output:await tv_run(adb,'-s',target,'shell','monkey','-p','ru.mediahub.app','-c','android.intent.category.LAUNCHER','1',timeout=20,env=env)
+        tv_step('done',f'Готово: MediaHUB {apk["version"]} установлен и запущен на {target}. Отладку на ТВ теперь можно выключить.')
+    except Exception as error:tv_step('error',str(error) or 'Установка на ТВ не удалась')
+    finally:
+        if adb and env:
+            try:await tv_run(adb,'disconnect',target,timeout=10,env=env);await tv_run(adb,'kill-server',timeout=10,env=env)
+            except Exception:pass
+
+@app.post('/api/apps/tv-install')
+async def apps_tv_install(request:Request,address:str=Form(...),pair_address:str=Form(''),pair_code:str=Form('')):
+    """Запустить установку APK на ТВ по сети; результат — в GET того же адреса."""
+    require_setup_access(request)
+    if TV_INSTALL.get('status') in {'running','waiting'}:raise HTTPException(409,'Установка на ТВ уже идёт')
+    try:
+        target=tv_install_target(address);pair_target=tv_install_target(pair_address,None) if pair_address.strip() else ''
+        if pair_target and not re.fullmatch(r'\d{6}',pair_code.strip()):raise ValueError('Код сопряжения — 6 цифр с экрана ТВ')
+    except ValueError as error:raise HTTPException(422,str(error))
+    TV_INSTALL.update(status='running',message='Начинаю установку…',log=[],target=target,startedAt=time.time())
+    task=asyncio.create_task(tv_install_job(target,pair_target,pair_code.strip()))
+    TV_INSTALL_TASKS.add(task);task.add_done_callback(TV_INSTALL_TASKS.discard)
+    return {'ok':True,'target':target}
+
+@app.get('/api/apps/tv-install')
+def apps_tv_install_status(request:Request):
+    """Состояние последней установки на ТВ."""
+    require_setup_access(request)
+    return {k:TV_INSTALL.get(k) for k in ('status','message','log','target','updatedAt')}
 
 @app.post('/api/setup/connect')
 async def setup_connect(request:Request):

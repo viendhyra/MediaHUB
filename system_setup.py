@@ -624,16 +624,40 @@ def unit_exists(unit: str) -> bool:
     return bool(p.stdout.strip())
 
 
+COMMAND_VERSIONS: Dict[tuple, str] = {}
+
+
 def command_version(command: List[str]) -> str:
+    """Версия программы; Radarr/Sonarr/Prowlarr стартуют секундами, поэтому ответ хранится до замены файла."""
+    try:
+        key = (tuple(command), os.stat(shutil.which(command[0]) or command[0]).st_mtime_ns)
+    except OSError:
+        key = None
+    if key in COMMAND_VERSIONS:
+        return COMMAND_VERSIONS[key]
+    version = ""
     try:
         p = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
         text = (p.stdout or "").strip().splitlines()
         if text:
             m = re.search(r"\d+(?:\.\d+){1,4}(?:[-+][\w.]+)?", " ".join(text[:3]))
-            return m.group(0) if m else text[0][:80]
+            version = m.group(0) if m else text[0][:80]
     except Exception:
         pass
-    return ""
+    if key and version:
+        COMMAND_VERSIONS[key] = version
+    return version
+
+
+def warm_versions() -> None:
+    """Параллельно узнать версии сервисов при старте портала, чтобы первое открытие настроек не ждало."""
+    from concurrent.futures import ThreadPoolExecutor
+    commands = [[str(Path("/opt") / name / name), "--version"] for name in ("Radarr", "Sonarr", "Prowlarr")]
+    commands = [c for c in commands if Path(c[0]).exists()]
+    if shutil.which("qbittorrent-nox"):
+        commands.append(["qbittorrent-nox", "--version"])
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(command_version, commands))
 
 
 def dpkg_version(package: str) -> str:

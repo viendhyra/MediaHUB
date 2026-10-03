@@ -35,7 +35,7 @@ class DistributionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('/'+sha+'/',request.url.path)
             return httpx.Response(200,text='22.0\n' if request.url.path.endswith('VERSION.txt') else '# История\n\n## 22.0\nНовая версия\n\n## 21.99\nСтарые новости')
         original=httpx.AsyncClient
-        with patch.object(httpx,'AsyncClient',side_effect=lambda **kwargs:original(transport=httpx.MockTransport(handler),**kwargs)):
+        with patch.object(httpx,'AsyncClient',side_effect=lambda **kwargs:original(**dict(kwargs,transport=httpx.MockTransport(handler)))):
             result=await self.scope['github_update_info']();cached=await self.scope['github_update_info']()
         self.assertTrue(result['available']);self.assertEqual(result['commit'],sha);self.assertEqual(result,cached)
         self.assertEqual(len(calls),3);self.assertNotIn('Старые новости',result['notes'])
@@ -43,9 +43,20 @@ class DistributionTests(unittest.IsolatedAsyncioTestCase):
     async def test_offline_github_is_recoverable(self):
         original=httpx.AsyncClient
         def handler(request):raise httpx.ConnectError('offline',request=request)
-        with patch.object(httpx,'AsyncClient',side_effect=lambda **kwargs:original(transport=httpx.MockTransport(handler),**kwargs)):
+        with patch.object(httpx,'AsyncClient',side_effect=lambda **kwargs:original(**dict(kwargs,transport=httpx.MockTransport(handler)))):
             result=await self.scope['github_update_info']()
         self.assertFalse(result['available']);self.assertIn('error',result)
+
+    async def test_github_retries_after_ipv4_failure(self):
+        original=httpx.AsyncClient;clients=[];sha='b'*40
+        def handler(request):
+            if len(clients)==1:raise httpx.ConnectError('ipv4 down',request=request)
+            if request.url.host=='api.github.com':return httpx.Response(200,json={'sha':sha})
+            return httpx.Response(200,text='99.0\n' if request.url.path.endswith('VERSION.txt') else '# История\n\n## 99.0\nНовое')
+        def client(**kwargs):clients.append(kwargs);return original(**dict(kwargs,transport=httpx.MockTransport(handler)))
+        with patch.object(httpx,'AsyncClient',side_effect=client):
+            result=await self.scope['github_update_info'](force=True)
+        self.assertEqual(len(clients),2);self.assertTrue(result['available']);self.assertNotIn('error',result)
 
     async def test_untrusted_commit_is_rejected(self):
         self.scope['github_update_info']=AsyncMock(return_value={'available':True,'commit':'a'*40})

@@ -17,6 +17,8 @@ printf '======================================================\n\n'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip ca-certificates curl ffmpeg git util-linux >/dev/null
+# adb нужен только для установки приложения на ТВ из настроек; без него портал работает.
+apt-get install -y -qq adb >/dev/null || echo "Предупреждение: пакет adb не установлен, установка на ТВ из настроек поставит его позже."
 
 install -d -m 755 "$APPDIR" "$APPDIR/templates" "$APPDIR/static"
 install -d -m 755 "$DATADIR" "$DATADIR/setup"
