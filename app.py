@@ -1,6 +1,7 @@
 
 import os, re, shutil, subprocess, sqlite3, xml.etree.ElementTree as ET, json, hashlib, asyncio, sys, ipaddress, time
-import threading
+import threading, secrets, hmac
+from contextvars import ContextVar
 from urllib.parse import quote
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -361,6 +362,243 @@ app=FastAPI(title="MediaHub")
 # v21: compress HTML/CSS/JSON on the wire. The shell alone is ~150 KB of text,
 # so gzip removes most of the first-paint transfer on a LAN client.
 app.add_middleware(GZipMiddleware,minimum_size=800)
+
+AUTH_USER=ContextVar('mediahub_account',default=None)
+AUTH_TOKEN=ContextVar('mediahub_token',default='')
+AUTH_FAILURES={}
+
+
+def auth_password(password,salt=None):
+    """Хранить только соль и медленный PBKDF2-хеш пароля."""
+    salt=salt or secrets.token_hex(16)
+    return salt+':'+hashlib.pbkdf2_hmac('sha256',password.encode(),salt.encode(),200000).hex()
+
+
+def auth_user_id():
+    """Идентификатор аккаунта текущего запроса, включая рабочие потоки."""
+    user=AUTH_USER.get()
+    if not user:raise HTTPException(401,'Войдите в аккаунт')
+    return user['id']
+
+
+def auth_public(user):
+    """Описание аккаунта без хеша пароля."""
+    return {'id':user['id'],'login':user['login'],'isAdmin':bool(user['is_admin'])}
+
+
+def auth_resolve(token):
+    """Проверить сохранённую сессию; в базе хранится только хеш токена."""
+    if not token or len(token)>128:return None
+    with cache_db() as con:
+        row=con.execute('select a.* from accounts a join account_sessions s on s.user_id=a.id where s.token_hash=? and s.expires>?',(hashlib.sha256(token.encode()).hexdigest(),time.time())).fetchone()
+    return dict(row) if row else None
+
+
+def auth_public_ip(value):
+    """Адрес из интернета, а не из домашней сети, Tailscale или самого сервера."""
+    try:addr=ipaddress.ip_address((value or '').strip())
+    except ValueError:return False
+    return not (addr.is_private or addr.is_loopback or addr.is_link_local or addr in ipaddress.ip_network('100.64.0.0/10'))
+
+
+def auth_external(request):
+    """Запрос пришёл снаружи: напрямую через проброс порта или через прокси в домашней сети."""
+    if auth_public_ip(request.client.host if request.client else ''):return True
+    # Прокси дописывает адрес клиента последним; начало заголовка может подделать сам клиент.
+    return auth_public_ip(request.headers.get('x-forwarded-for','').split(',')[-1])
+
+
+def auth_normalize_address(value):
+    """Привести внешний адрес к виду http(s)://хост[:порт]; домен, IP и порт допускаются."""
+    value=(value or '').strip().rstrip('/')
+    if not value:return ''
+    if '://' not in value:value='http://'+value
+    m=re.fullmatch(r'(https?)://([A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:]+\])(?::(\d{1,5}))?',value,re.I)
+    if not m or (m.group(3) and not 1<=int(m.group(3))<=65535) or '..' in m.group(2) or m.group(2).startswith(('.','-')):
+        raise HTTPException(400,f'Не похоже на адрес: {value}. Пример: http://мой-дом.ddns.net:18090')
+    return m.group(1).lower()+'://'+m.group(2).lower()+(':'+m.group(3) if m.group(3) else '')
+
+
+def auth_lan_addresses():
+    """Адреса портала в домашней сети: по ним приложение подключается, когда устройство дома."""
+    port=int(os.getenv('MEDIAHUB_PORT') or 8090);found=[]
+    try:found=subprocess.run(['hostname','-I'],capture_output=True,text=True,timeout=2).stdout.split()
+    except Exception:pass
+    ips=[ip for ip in found if re.fullmatch(r'\d+\.\d+\.\d+\.\d+',ip) and not auth_public_ip(ip) and not ip.startswith(('127.','172.17.'))]
+    return [f'http://{ip}:{port}' for ip in ips[:3]]
+
+
+def auth_external_addresses():
+    """Внешние адреса, которые администратор сохранил для подключения из интернета."""
+    with cache_db() as con:row=con.execute("select value from meta where key='connect_addresses'").fetchone()
+    try:return [x for x in json.loads(row['value']) if isinstance(x,str)][:5] if row else []
+    except ValueError:return []
+
+
+def auth_addresses():
+    """Все адреса портала по порядку: сначала домашние, затем внешние."""
+    return list(dict.fromkeys(auth_lan_addresses()+auth_external_addresses()))
+
+
+def auth_known_tokens(request):
+    """Сессии аккаунтов, в которые уже входили в этом браузере (HttpOnly-cookie)."""
+    return [t for t in request.cookies.get('mh_known','').split('.') if 20<=len(t)<=128][:8]
+
+
+def auth_set_known(response,request,tokens):
+    """Запомнить сессии браузера для быстрого переключения аккаунтов без пароля."""
+    tokens=list(dict.fromkeys(tokens))[-8:]
+    if tokens:response.set_cookie('mh_known','.'.join(tokens),max_age=30*86400,httponly=True,samesite='strict',secure=request.url.scheme=='https')
+    else:response.delete_cookie('mh_known')
+
+
+def auth_same_origin(request):
+    """Запрет входа и переключения со сторонних сайтов: Origin должен совпадать с адресом портала."""
+    origin=request.headers.get('origin')
+    if origin and origin.rstrip('/')!=str(request.base_url).rstrip('/'):raise HTTPException(403,'Вход с другого сайта запрещён')
+
+
+@app.middleware('http')
+async def account_access(request:Request,call_next):
+    """Защитить API, разделить историю и запретить управление сервером обычным аккаунтам."""
+    path=request.url.path
+    if not path.startswith('/api/') or path in {'/api/version','/api/discovery','/api/apps','/api/apps/android/download','/api/auth/login','/api/auth/known','/api/auth/switch'}:
+        return await call_next(request)
+    bearer=request.headers.get('authorization','')
+    token=bearer[7:] if bearer.startswith('Bearer ') else request.cookies.get('mh_session','')
+    user=await asyncio.to_thread(auth_resolve,token)
+    if not user:return JSONResponse({'detail':'Войдите в аккаунт'},status_code=401,headers={'Cache-Control':'no-store'})
+    if request.method not in {'GET','HEAD','OPTIONS'} and not bearer.startswith('Bearer ') and request.headers.get('x-mediahub-auth')!='1':
+        return JSONResponse({'detail':'Запрос требует подтверждения сессии'},status_code=403)
+    personal=path.startswith('/api/auth/') or path in {'/api/player/progress','/api/remote/poll','/api/remote/state','/api/remote/send'}
+    administrative=path.startswith(('/api/setup','/api/updates','/api/auth/accounts','/api/auth/addresses','/api/activity','/api/service','/api/storage','/api/apps/tv-install','/api/preferences'))
+    if not user['is_admin'] and (administrative or (request.method not in {'GET','HEAD','OPTIONS'} and not personal)):
+        return JSONResponse({'detail':'Доступно только администратору'},status_code=403)
+    context=AUTH_USER.set(user);session=AUTH_TOKEN.set(hashlib.sha256(token.encode()).hexdigest())
+    try:
+        response=await call_next(request)
+        response.headers['Cache-Control']='private, no-store'
+        return response
+    finally:AUTH_USER.reset(context);AUTH_TOKEN.reset(session)
+
+
+@app.post('/api/auth/login')
+async def auth_login(request:Request,login:str=Form(...),password:str=Form(...)):
+    """Выдать сессию после проверки пароля; ограничить перебор по адресу клиента."""
+    auth_same_origin(request)
+    address=request.client.host if request.client else ''
+    if address and not auth_public_ip(address):address=request.headers.get('x-forwarded-for','').split(',')[-1].strip() or address
+    now=time.time();attempts=[x for x in AUTH_FAILURES.get(address,[]) if now-x<600]
+    if len(attempts)>=10:raise HTTPException(429,'Слишком много попыток. Повторите через 10 минут')
+    if len(AUTH_FAILURES)>1024:AUTH_FAILURES.clear()
+    AUTH_FAILURES[address]=attempts+[now]
+    if len(login)>64 or len(password)>256:raise HTTPException(401,'Неверный логин или пароль')
+    with cache_db() as con:row=con.execute('select * from accounts where login=?',(login.strip().casefold(),)).fetchone()
+    stored=row['password_hash'] if row else auth_password('invalid')
+    calculated=await asyncio.to_thread(auth_password,password,stored.split(':')[0])
+    if not row or not hmac.compare_digest(stored,calculated):raise HTTPException(401,'Неверный логин или пароль')
+    # Через проброс порта пароль идёт по http открыто: заводской admin/admin снаружи угадывается первым.
+    if auth_external(request) and password=='admin':raise HTTPException(403,'Из интернета нельзя войти с паролем по умолчанию. Смените пароль дома: «Настройки → Аккаунт»')
+    AUTH_FAILURES.pop(address,None);token=secrets.token_urlsafe(32)
+    with cache_db() as con:
+        con.execute('delete from account_sessions where expires<?',(now,))
+        con.execute('insert into account_sessions values(?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),row['id'],now+30*86400));con.commit()
+    response=JSONResponse({'token':token,'user':auth_public(row),'addresses':await asyncio.to_thread(auth_addresses)},headers={'Cache-Control':'no-store'})
+    response.set_cookie('mh_session',token,max_age=30*86400,httponly=True,samesite='strict',secure=request.url.scheme=='https')
+    # Прежний вход того же аккаунта в этом браузере заменяется новым, остальные аккаунты остаются.
+    known=[t for t in auth_known_tokens(request) if (u:=await asyncio.to_thread(auth_resolve,t)) and u['id']!=row['id']]
+    auth_set_known(response,request,known+[token])
+    return response
+
+
+@app.get('/api/auth/me')
+def auth_me():
+    """Текущий аккаунт и адреса портала (дома и снаружи) для веба и приложения."""
+    return {**auth_public(AUTH_USER.get()),'addresses':auth_addresses()}
+
+
+@app.get('/api/auth/known')
+def auth_known(request:Request):
+    """Аккаунты, в которые входили в этом браузере: выбрать свой можно без пароля."""
+    current=request.cookies.get('mh_session','');items=[]
+    for token in auth_known_tokens(request):
+        user=auth_resolve(token)
+        if user and all(x['id']!=user['id'] for x in items):items.append({**auth_public(user),'current':hmac.compare_digest(token,current)})
+    return {'items':items}
+
+
+@app.post('/api/auth/switch')
+def auth_switch(request:Request,login:str=Form(...)):
+    """Переключить браузер на другой сохранённый аккаунт без повторного ввода пароля."""
+    auth_same_origin(request)
+    if request.headers.get('x-mediahub-auth')!='1':raise HTTPException(403,'Запрос требует подтверждения сессии')
+    for token in auth_known_tokens(request):
+        user=auth_resolve(token)
+        if user and user['login']==login.strip().casefold():
+            response=JSONResponse({'user':auth_public(user)},headers={'Cache-Control':'no-store'})
+            response.set_cookie('mh_session',token,max_age=30*86400,httponly=True,samesite='strict',secure=request.url.scheme=='https')
+            return response
+    raise HTTPException(401,'Вход в этот аккаунт истёк. Введите пароль')
+
+
+@app.post('/api/auth/logout')
+def auth_logout(request:Request):
+    """Завершить только текущую сессию; остальные аккаунты этого браузера остаются для выбора."""
+    with cache_db() as con:con.execute('delete from account_sessions where token_hash=?',(AUTH_TOKEN.get(),));con.commit()
+    response=JSONResponse({'ok':True});response.delete_cookie('mh_session')
+    auth_set_known(response,request,[t for t in auth_known_tokens(request) if hashlib.sha256(t.encode()).hexdigest()!=AUTH_TOKEN.get()])
+    return response
+
+
+@app.get('/api/auth/addresses')
+def auth_addresses_settings():
+    """Адреса подключения для настроек администратора и предупреждение о заводском пароле."""
+    with cache_db() as con:admin=con.execute("select password_hash from accounts where login='admin'").fetchone()
+    default=bool(admin) and hmac.compare_digest(admin['password_hash'],auth_password('admin',admin['password_hash'].split(':')[0]))
+    return {'local':auth_lan_addresses(),'external':auth_external_addresses(),'defaultPassword':default}
+
+
+@app.post('/api/auth/addresses')
+def auth_save_addresses(external:str=Form('')):
+    """Сохранить внешние адреса (по одному в строке): IP или домен с портом проброса."""
+    items=list(dict.fromkeys(x for x in (auth_normalize_address(v) for v in re.split(r'[\s,;]+',external)) if x))
+    if len(items)>5:raise HTTPException(400,'Не больше пяти внешних адресов')
+    with cache_db() as con:con.execute("insert or replace into meta(key,value) values('connect_addresses',?)",(json.dumps(items),));con.commit()
+    return {'external':items}
+
+
+@app.get('/api/auth/accounts')
+def auth_accounts():
+    """Список аккаунтов для администратора."""
+    with cache_db() as con:return {'items':[auth_public(r) for r in con.execute('select * from accounts order by login')]}
+
+
+@app.post('/api/auth/accounts')
+def auth_create_account(login:str=Form(...),password:str=Form(...)):
+    """Создать обычный аккаунт с независимой историей."""
+    login=login.strip().casefold()
+    if not re.fullmatch(r'[a-z0-9_.-]{1,64}',login):raise HTTPException(400,'Логин: латинские буквы, цифры, точка, дефис или подчёркивание')
+    if not 4<=len(password)<=256:raise HTTPException(400,'Пароль: от 4 до 256 символов')
+    with cache_db() as con:
+        try:con.execute('insert into accounts(login,password_hash) values(?,?)',(login,auth_password(password)));con.commit()
+        except sqlite3.IntegrityError:raise HTTPException(409,'Логин уже занят')
+    return {'ok':True}
+
+
+@app.post('/api/auth/password')
+def auth_change_password(password:str=Form(...),current_password:str=Form(''),user_id:int=Form(0)):
+    """Смена своего пароля или сброс администратором; остальные сессии отзываются."""
+    user=AUTH_USER.get();target=user_id or user['id']
+    if target!=user['id'] and not user['is_admin']:raise HTTPException(403,'Нельзя менять чужой пароль')
+    if not 4<=len(password)<=256 or len(current_password)>256:raise HTTPException(400,'Пароль: от 4 до 256 символов')
+    if target==user['id'] and not hmac.compare_digest(user['password_hash'],auth_password(current_password,user['password_hash'].split(':')[0])):
+        raise HTTPException(400,'Текущий пароль неверен')
+    with cache_db() as con:
+        if not con.execute('select 1 from accounts where id=?',(target,)).fetchone():raise HTTPException(404,'Аккаунт не найден')
+        con.execute('update accounts set password_hash=? where id=?',(auth_password(password),target))
+        con.execute('delete from account_sessions where user_id=? and token_hash!=?',(target,AUTH_TOKEN.get() if target==user['id'] else ''));con.commit()
+    return {'ok':True}
+
 
 class CachedStatic(StaticFiles):
     """Static assets are requested with ?v=<app version>, so a long immutable
@@ -1295,6 +1533,18 @@ def cache_db():
         path text primary key, project text not null, position real not null,
         duration real not null, completed integer not null default 0,
         signature text not null, updated_at real not null)""")
+    con.execute("create table if not exists accounts(id integer primary key autoincrement,login text not null unique,password_hash text not null,is_admin integer not null default 0)")
+    con.execute("create table if not exists account_sessions(token_hash text primary key,user_id integer not null,expires real not null)")
+    con.execute("""create table if not exists account_playback_history(
+        user_id integer not null,path text not null,project text not null,position real not null,
+        duration real not null,completed integer not null default 0,signature text not null,updated_at real not null,
+        primary key(user_id,path))""")
+    if not con.execute("select 1 from accounts limit 1").fetchone():
+        con.execute("insert or ignore into accounts(login,password_hash,is_admin) values(?,?,1)",('admin',auth_password('admin')))
+    if not con.execute("select 1 from meta where key='account_history_migrated'").fetchone():
+        admin=con.execute("select id from accounts where login='admin'").fetchone()
+        if admin:con.execute("insert or ignore into account_playback_history select ?,path,project,position,duration,completed,signature,updated_at from playback_history",(admin['id'],))
+        con.execute("insert or ignore into meta(key,value) values('account_history_migrated','1')")
     con.execute("""create table if not exists bindings(
         kind text not null,indexer_id integer not null,enabled integer not null default 1,
         primary key(kind,indexer_id))""")
@@ -2150,7 +2400,9 @@ async def home(request:Request):
     )
 
 @app.get("/api/version")
-async def api_version():
+async def api_version(request:Request):
+    # Маршрут открыт без входа: снаружи не раскрываем устройство сервера.
+    if auth_external(request):return {"name":"MediaHub","version":APP_VERSION}
     return {
         "name":"MediaHub",
         "version":APP_VERSION,
@@ -4718,13 +4970,13 @@ def player_probe(f):
 def player_normalize_history():
     """Учесть титры в ранее сохранённой истории, не меняя позицию просмотра."""
     with cache_db() as con:
-        con.execute('update playback_history set completed=1 where completed=0 and duration>0 and position>=max(duration*.85,duration-180)');con.commit()
+        con.execute('update account_playback_history set completed=1 where user_id=? and completed=0 and duration>0 and position>=max(duration*.85,duration-180)',(auth_user_id(),));con.commit()
 
 
 def player_saved(f):
     """Вернуть позицию только для неизменённого видеофайла."""
     player_normalize_history()
-    with cache_db() as con:row=con.execute('select * from playback_history where path=?',(str(f),)).fetchone()
+    with cache_db() as con:row=con.execute('select * from account_playback_history where user_id=? and path=?',(auth_user_id(),str(f))).fetchone()
     return dict(row) if row and row['signature']==player_signature(f) else {}
 
 
@@ -4732,7 +4984,7 @@ def player_resume_items():
     """Собрать полку незаконченных просмотров встроенного плеера."""
     player_normalize_history()
     with cache_db() as con:
-        rows=con.execute('select * from playback_history where completed=0 and position>=5 order by updated_at desc limit 80').fetchall()
+        rows=con.execute('select * from account_playback_history where user_id=? and completed=0 and position>=5 order by updated_at desc limit 80',(auth_user_id(),)).fetchall()
         cards={r['path']:dict(r) for r in con.execute('select path,title,poster,kind from library_cache where has_file=1')}
     out=[];seen=set()
     for row in rows:
@@ -4768,7 +5020,7 @@ async def player_session(path:str=Query(...),file:str=''):
         if not any(Path(x['path']).resolve()==chosen for x in items):raise HTTPException(400,'Файл не принадлежит проекту')
     else:
         chosen=player_file(items[0]['path'])
-        with cache_db() as con:rows=con.execute('select * from playback_history where project=? order by updated_at desc',(str(Path(path).resolve()),)).fetchall()
+        with cache_db() as con:rows=con.execute('select * from account_playback_history where user_id=? and project=? order by updated_at desc',(auth_user_id(),str(Path(path).resolve()))).fetchall()
         for r in rows:
             index=next((i for i,x in enumerate(items) if Path(x['path']).resolve()==Path(r['path'])),None)
             if index is None or r['signature']!=player_signature(player_file(r['path'])):continue
@@ -4786,7 +5038,7 @@ async def player_project(path:str=Query(...)):
     """Вернуть серии с историей без анализа кодеков каждого большого файла."""
     player_normalize_history()
     listing=await library_files(path);items=[];latest=None
-    with cache_db() as con:history={r['path']:dict(r) for r in con.execute('select * from playback_history where project=?',(str(Path(path).resolve()),))}
+    with cache_db() as con:history={r['path']:dict(r) for r in con.execute('select * from account_playback_history where user_id=? and project=?',(auth_user_id(),str(Path(path).resolve())))}
     for item in listing['items']:
         if not item['video'] or not safe_media_path(Path(item['path'])):continue
         f=Path(item['path']).resolve();item['path']=str(f);saved=history.get(str(f),{})
@@ -4828,13 +5080,13 @@ async def player_subtitle(path:str=Query(...)):
 
 @app.post('/api/player/progress')
 async def player_progress(path:str=Form(...),position:float=Form(...),duration:float=Form(...),ended:int=Form(0)):
-    """Сохранить общую домашнюю историю просмотра и отметку завершения."""
+    """Сохранить личную историю просмотра и отметку завершения."""
     import math
     f=player_file(path)
     if not math.isfinite(position) or not math.isfinite(duration) or position<0 or duration<=0 or duration>7*86400:raise HTTPException(400,'Некорректная позиция просмотра')
     position=min(position,duration);completed=int(bool(ended) or position>=max(duration*.85,duration-180))
     with cache_db() as con:
-        con.execute('insert or replace into playback_history values(?,?,?,?,?,?,?)',(str(f),str(_project_root_for(f)),position,duration,completed,player_signature(f),time.time()));con.commit()
+        con.execute('insert or replace into account_playback_history values(?,?,?,?,?,?,?,?)',(auth_user_id(),str(f),str(_project_root_for(f)),position,duration,completed,player_signature(f),time.time()));con.commit()
     return {'ok':True,'completed':bool(completed)}
 
 
@@ -4850,11 +5102,11 @@ REMOTE_SEQ=[int(time.time()*1000)]
 
 def remote_device(device,name='',kind='tv'):
     """Найти или создать запись устройства; имя обновляется при каждом опросе."""
-    d=REMOTE_DEVICES.get(device)
+    d=REMOTE_DEVICES.get((auth_user_id(),device))
     if d is None:
         if len(REMOTE_DEVICES)>=32:
-            stale=min(REMOTE_DEVICES.values(),key=lambda x:x['seen']);REMOTE_DEVICES.pop(stale['id'],None)
-        d=REMOTE_DEVICES[device]={'id':device,'name':'','kind':kind,'seen':0,'queue':[],'state':{},'event':None,'polls':0,'away':False}
+            stale=min(REMOTE_DEVICES.values(),key=lambda x:x['seen']);REMOTE_DEVICES.pop((stale['user_id'],stale['id']),None)
+        d=REMOTE_DEVICES[(auth_user_id(),device)]={'user_id':auth_user_id(),'id':device,'name':'','kind':kind,'seen':0,'queue':[],'state':{},'event':None,'polls':0,'away':False}
     if name:d['name']=name[:60]
     if kind:d['kind']=kind[:16]
     return d
@@ -4884,7 +5136,7 @@ async def remote_poll(device:str=Query(...,pattern=r'^[A-Za-z0-9_-]{6,64}$'),nam
 async def remote_state(device:str=Form(...),title:str=Form(''),subtitle:str=Form(''),poster:str=Form(''),project:str=Form(''),file:str=Form(''),section:str=Form(''),playing:int=Form(0),position:float=Form(0),duration:float=Form(0),active:int=Form(1),away:int=Form(0)):
     """Что сейчас идёт на телевизоре — для экрана пульта на телефоне. away=1 — приложение
     на ТВ свёрнуто: команды до возвращения не выполнятся, поэтому ТВ сразу пропадает из списка."""
-    d=REMOTE_DEVICES.get(device)
+    d=REMOTE_DEVICES.get((auth_user_id(),device))
     if d is None:raise HTTPException(404,'Устройство не зарегистрировано')
     d['seen']=time.time();d['away']=bool(away)
     d['state']={'title':title[:200],'subtitle':subtitle[:200],'poster':poster[:2000],'project':project,'file':file,'section':section[:16],'playing':bool(playing),'position':max(0.0,position),'duration':max(0.0,duration),'updatedAt':time.time()} if active else {}
@@ -4894,7 +5146,7 @@ async def remote_state(device:str=Form(...),title:str=Form(''),subtitle:str=Form
 @app.get('/api/remote/devices')
 async def remote_devices():
     """Устройства, на которые можно отправить просмотр, и что на каждом идёт."""
-    devices=[remote_public(d) for d in REMOTE_DEVICES.values()]
+    devices=[remote_public(d) for d in REMOTE_DEVICES.values() if d['user_id']==auth_user_id()]
     return {'devices':sorted([d for d in devices if d['online']],key=lambda d:d['name'].casefold())}
 
 
@@ -4902,7 +5154,7 @@ async def remote_devices():
 async def remote_send(device:str=Form(...),action:str=Form(...),path:str=Form(''),file:str=Form(''),restart:int=Form(0),seconds:float=Form(0),start:float=Form(-1),title:str=Form(''),poster:str=Form(''),kind:str=Form('')):
     """Поставить команду в очередь телевизора и сразу разбудить его опрос."""
     import math
-    d=REMOTE_DEVICES.get(device)
+    d=REMOTE_DEVICES.get((auth_user_id(),device))
     if d is None or not remote_public(d)['online']:raise HTTPException(404,'Телевизор не в сети. Откройте на нём MediaHub.')
     if action not in REMOTE_ACTIONS:raise HTTPException(400,'Неизвестная команда пульта')
     if not math.isfinite(seconds) or not math.isfinite(start):raise HTTPException(400,'Некорректная позиция')
@@ -4937,7 +5189,7 @@ async def player_stop_process(proc):
 
 
 @app.get('/api/player/stream')
-async def player_stream(path:str=Query(...),start:float=Query(0,ge=0,le=604800),audio:int=Query(0,ge=0,le=100),quality:str=Query('auto',pattern='^(auto|480|720|original)$'),timeline:str=Query('accurate',pattern='^(accurate|keyframe)$')):
+async def player_stream(path:str=Query(...),start:float=Query(0,ge=0,le=604800),audio:int=Query(0,ge=0,le=100),quality:str=Query('auto',pattern='^(auto|480|720|original)$'),bitrate:int=Query(0,ge=0,le=20000),timeline:str=Query('accurate',pattern='^(accurate|keyframe)$')):
     """Передавать совместимый H.264/AAC поток; максимум два кодировщика."""
     import math
     f=player_file(path);probe=await asyncio.to_thread(player_probe,f);binary=player_binary('ffmpeg')
@@ -4947,6 +5199,8 @@ async def player_stream(path:str=Query(...),start:float=Query(0,ge=0,le=604800),
     if probe['duration'] and start>=probe['duration']:raise HTTPException(400,'Позиция за концом видео')
     if len(PLAYER_TRANSCODES)>=2:raise HTTPException(429,'Два просмотра уже используют конвертацию. Повтори позже')
     if quality=='original' and not probe.get('remux'):raise HTTPException(400,'Исходный формат требует конвертации')
+    if bitrate and bitrate not in {1000,2000,4000,8000,12000,20000}:raise HTTPException(400,'Неизвестная скорость потока')
+    if bitrate:probe=dict(probe,remux=False)
     anchor=start
     if probe.get('remux') and quality in {'auto','original'} and start>0:
         anchor=await asyncio.to_thread(player_seek_anchor,f,start) if timeline=='keyframe' else None
@@ -4954,7 +5208,7 @@ async def player_stream(path:str=Query(...),start:float=Query(0,ge=0,le=604800),
             probe=dict(probe,remux=False);anchor=start
             if quality=='original':quality='720'
     token=object();PLAYER_TRANSCODES.add(token);proc=None
-    args=player_stream_args(binary,f,probe,anchor,audio,quality)
+    args=player_stream_args(binary,f,probe,anchor,audio,quality,bitrate)
     try:
         proc=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
         first=await asyncio.wait_for(proc.stdout.read(65536),20)
@@ -4994,15 +5248,18 @@ def player_seek_anchor(f,start):
     except (OSError,ValueError,KeyError,subprocess.SubprocessError):return None
 
 
-def player_stream_args(binary,f,probe,start,audio,quality):
+def player_stream_args(binary,f,probe,start,audio,quality,bitrate=0):
     """Сохранить H.264 без перекодирования; сложные кодеки конвертировать быстрее."""
-    copy=probe.get('remux') and quality in {'auto','original'}
+    copy=not bitrate and probe.get('remux') and quality in {'auto','original'}
     size=quality if quality in {'480','720'} else probe.get('defaultQuality','720')
+    if bitrate and quality=='auto':size='480' if bitrate<=2000 else '720'
+    rate=str(max(256,bitrate-128))+'k' if bitrate else ('2500k' if size=='480' else '4500k')
+    buffer=str(max(512,(bitrate-128)*2))+'k' if bitrate else ('5000k' if size=='480' else '9000k')
     width,height=(854,480) if size=='480' else (1280,720)
     threads=str(max(1,min(4,(os.cpu_count() or 2)-1)))
     args=[binary,'-nostdin','-hide_banner','-loglevel','error','-ss',str(start),'-threads',threads,*(['-noaccurate_seek'] if copy else []),'-i',str(f),'-map','0:v:0','-map',f'0:a:{audio}?','-sn','-dn']
     if copy:args+=['-c:v','copy']
-    else:args+=['-vf',f"scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",'-c:v','libx264','-profile:v','baseline','-level','3.1','-pix_fmt','yuv420p','-preset','ultrafast','-crf','24','-fps_mode','passthrough','-g','50','-threads',threads,'-maxrate','2500k' if size=='480' else '4500k','-bufsize','5000k' if size=='480' else '9000k']
+    else:args+=['-vf',f"scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",'-c:v','libx264','-profile:v','baseline','-level','3.1','-pix_fmt','yuv420p','-preset','ultrafast','-crf','24','-fps_mode','passthrough','-g','50','-threads',threads,'-maxrate',rate,'-bufsize',buffer]
     args+=['-af','aresample=async=1:first_pts=0' if not copy else 'aresample=async=1','-c:a','aac','-ac','2','-b:a','128k','-avoid_negative_ts','make_zero','-movflags','frag_keyframe+empty_moov+default_base_moof','-frag_duration','1000000','-f','mp4','pipe:1']
     return args
 
@@ -7854,7 +8111,7 @@ def library_collections(kind:str=Query("movies")):
         for c in cols:
             items=[]
             for r in con.execute("select path from library_collection_items where collection_id=? order by position",(c["id"],)).fetchall():
-                hist=con.execute("select position,duration,completed from playback_history where project=? order by updated_at desc",(r["path"],)).fetchall()
+                hist=con.execute("select position,duration,completed from account_playback_history where user_id=? and project=? order by updated_at desc",(auth_user_id(),r["path"])).fetchall()
                 last=hist[0] if hist else None
                 items.append({"path":r["path"],"completed":bool(last and last["completed"]),
                               "position":last["position"] if last else 0,"duration":last["duration"] if last else 0,

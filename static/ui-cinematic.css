@@ -5,6 +5,8 @@
    Этап 1: токены, каркас (фон, верхняя панель, боковое меню), кнопки, поля, панели, окна. */
 
 /* --- tokens --- */
+.cinematicHome{display:none}
+.cinematicBottom{display:none}
 :root[data-ui="cinematic"]{
  --c-canvas:#08090B;--c-surface:#0D0F13;--c-surface-plus:#171A20;--c-surface-hi:#1E222A;
  --c-primary:#8BB7FF;--c-primary-hi:#A9CAFF;--c-primary-ink:#071631;--c-violet:#9B7CFF;--c-rose:#FF657D;
@@ -78,7 +80,7 @@
  :root[data-ui="cinematic"] .sideNav{background:rgba(8,9,11,.7);border-right:1px solid var(--c-line);backdrop-filter:var(--c-blur)}
  :root[data-ui="cinematic"] .sideNav button.active .navPill{background:rgba(139,183,255,.16);color:var(--c-primary)}
 }
-:root[data-ui="cinematic"] main{max-width:1680px;padding:24px 28px 32px}
+:root[data-ui="cinematic"] main{max-width:none;min-width:0;padding:24px 28px 32px}
 
 /* --- surfaces --- */
 :root[data-ui="cinematic"] :is(.hero,.panel){background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,.012)),var(--c-surface);border:1px solid var(--c-line);border-radius:var(--c-r-panel);box-shadow:var(--c-shadow);padding:24px}
@@ -151,13 +153,19 @@
 :root[data-ui="cinematic"] .spinner{border-color:rgba(255,255,255,.1);border-top-color:var(--c-primary)}
 
 /* --- движение: смена раздела — fade + 10 px, без полноэкранных слайдов --- */
-:root[data-ui="cinematic"] main>.page:not(.hidden){animation:mhCinePage .3s var(--c-panel-ease) both}
-@keyframes mhCinePage{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-@keyframes mhCinePanel{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+:root[data-ui="cinematic"] main>.page:not(.hidden){animation:mhCinePage .16s ease-out}
+@keyframes mhCinePage{from{opacity:.7}to{opacity:1}}
+@keyframes mhCinePanel{from{opacity:.7}to{opacity:1}}
 @media(prefers-reduced-motion:reduce){:root[data-ui="cinematic"] :is(main>.page,.modalbox,.detailbox){animation:none!important}:root[data-ui="cinematic"] *{translate:none!important}}
 
 /* --- телефон: те же токены; отдельная мобильная композиция — этап 6 --- */
 @media(max-width:760px){
+ :root[data-ui="cinematic"]{--bottom-nav:88px}
+ :root[data-ui="cinematic"] body{padding-bottom:calc(88px + env(safe-area-inset-bottom))}
+ :root[data-ui="cinematic"] .cinematicBottom{position:fixed;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));z-index:70;left:12px;right:12px;bottom:calc(8px + env(safe-area-inset-bottom));padding:6px;border:1px solid var(--c-line-hi);border-radius:22px;background:rgba(13,15,19,.94);backdrop-filter:var(--c-blur)}
+ :root[data-ui="cinematic"] .cinematicBottom button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;min-height:56px;padding:4px 0;background:transparent;color:var(--g-muted);border-radius:16px}
+ :root[data-ui="cinematic"] .cinematicBottom button b{font-size:9px}
+ :root[data-ui="cinematic"] .cinematicBottom button.active{background:rgba(139,183,255,.14);color:var(--c-primary)}
  :root[data-ui="cinematic"] main{padding:12px 16px 20px}
  :root[data-ui="cinematic"] :is(.homeSectionHead h2,.sectionTitle h2){font-size:20px}
  :root[data-ui="cinematic"] :is(.hero,.panel){border-radius:var(--c-r-card);padding:16px}
@@ -179,3 +187,304 @@
 .uiSkinSwatch.classic{background:linear-gradient(135deg,#1e1f20 0 50%,#a8c7fa 50% 60%,#232425 60%)}
 .uiSkinSwatch.cinematic{background:radial-gradient(circle at 25% 20%,rgba(139,183,255,.55),transparent 55%),radial-gradient(circle at 85% 90%,rgba(155,124,255,.45),transparent 55%),#08090B}
 @media(max-width:760px){.uiSkinCard{grid-template-columns:1fr}.uiSkinOptions{display:grid;grid-template-columns:1fr 1fr}.uiSkinOption{padding-right:10px}}
+
+/* Главная: контентный свет приходит из обложки, основное действие — из истории. */
+:root[data-ui="cinematic"] .cinematicHome{display:block}
+:root[data-ui="cinematic"] .welcome{padding:8px 0 24px}
+:root[data-ui="cinematic"] .welcome h1{font-size:clamp(28px,3vw,40px)}
+:root[data-ui="cinematic"] .cinematicHero{position:relative;isolation:isolate;display:flex;align-items:center;min-height:360px;overflow:hidden;border:1px solid var(--c-line);border-radius:28px;background:radial-gradient(ellipse at 78% 22%,rgba(155,124,255,.22),transparent 55%),var(--c-surface);box-shadow:var(--c-shadow)}
+:root[data-ui="cinematic"] .cinematicHeroArt{position:absolute;inset:0;z-index:-1;overflow:hidden}
+:root[data-ui="cinematic"] .cinematicHeroArt :is(img,.posterStub){width:100%;height:100%;object-fit:cover;object-position:50% 30%;opacity:.65}
+:root[data-ui="cinematic"] .cinematicHero:after{content:"";position:absolute;inset:0;z-index:-1;background:linear-gradient(90deg,#0d0f13 8%,rgba(13,15,19,.88) 36%,rgba(13,15,19,.12)),linear-gradient(0deg,rgba(13,15,19,.8),transparent 60%)}
+:root[data-ui="cinematic"] .cinematicHeroCopy{padding:40px;width:min(760px,85%)}
+:root[data-ui="cinematic"] .cinematicHero h2{font-size:clamp(32px,4.5vw,60px);line-height:1.05;margin:20px 0;overflow-wrap:anywhere}
+:root[data-ui="cinematic"] .cinematicHeroFacts{color:var(--g-text2);line-height:1.6;overflow-wrap:anywhere}
+:root[data-ui="cinematic"] .cinematicHeroOverview{max-width:580px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--g-muted);line-height:1.65}
+:root[data-ui="cinematic"] .cinematicHeroActions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}
+:root[data-ui="cinematic"] .cinematicHeroActions button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding:0 24px}
+:root[data-ui="cinematic"] .cinematicHeroActions .primary{background:var(--g-text);color:var(--c-canvas);box-shadow:none}
+:root[data-ui="cinematic"] .cinematicHeroProgress{height:4px;max-width:360px;border-radius:8px;overflow:hidden;background:var(--c-fill-3);margin-top:24px}
+:root[data-ui="cinematic"] .cinematicHeroProgress i{display:block;height:100%;background:var(--c-primary)}
+:root[data-ui="cinematic"] .cinematicQuick{display:none}
+:root[data-ui="cinematic"] .homeSection{margin:32px 0}
+:root[data-ui="cinematic"] .shelf{gap:16px;padding-top:8px;padding-bottom:16px}
+:root[data-ui="cinematic"] .shelfCard{flex-basis:170px;aspect-ratio:2/3}
+:root[data-ui="cinematic"] .shelfFade{background:linear-gradient(0deg,rgba(8,9,11,.96),rgba(8,9,11,.3) 38%,transparent 65%)}
+:root[data-ui="cinematic"] .shelfTitle{font-size:14px;line-height:1.3;left:16px;right:16px;bottom:36px}
+:root[data-ui="cinematic"] .shelfMeta{font-size:11px;color:var(--g-text2);left:16px;right:16px;bottom:15px}
+:root[data-ui="cinematic"] .resumeCard{flex-basis:290px;aspect-ratio:16/10}
+:root[data-ui="cinematic"] .resumeProgress{height:4px;background:var(--c-fill-3)}
+:root[data-ui="cinematic"] .resumeProgress i{background:var(--c-primary)}
+:root[data-ui="cinematic"] :is(.card .content,.browseCardBody){padding:16px}
+:root[data-ui="cinematic"] .browseCardBody{min-height:170px}
+:root[data-ui="cinematic"] :is(.cardTop h3,.browseCardBody h3){font-size:15px;line-height:1.35}
+:root[data-ui="cinematic"] .browseCardBody p{min-height:0;-webkit-line-clamp:2}
+:root[data-ui="cinematic"] :is(.openCard,.browseCardActions button){min-height:44px}
+/* Проект занимает отдельный экран; окно с релизами сохраняет свой сценарий. */
+:root[data-ui="cinematic"] .watchProjectModal{padding:0;background:var(--c-canvas)}
+:root[data-ui="cinematic"] .watchProjectBox{width:100%;max-width:none;min-height:100%;border:0;border-radius:0;box-shadow:none}
+:root[data-ui="cinematic"] .watchHero{grid-template-columns:240px minmax(0,1fr);gap:36px;min-height:440px;padding:64px 48px 40px}
+:root[data-ui="cinematic"] .watchPoster{border-radius:22px}
+:root[data-ui="cinematic"] .watchHeroText h1{font-size:clamp(32px,4vw,56px);line-height:1.08}
+:root[data-ui="cinematic"] .watchBackdrop img{filter:none;transform:none;opacity:.3}
+:root[data-ui="cinematic"] .watchBackdrop:after{background:linear-gradient(90deg,rgba(13,15,19,.9),rgba(13,15,19,.45)),linear-gradient(0deg,var(--c-surface),transparent 80%)}
+:root[data-ui="cinematic"] .watchEpisodeSection{padding:12px 48px 48px}
+:root[data-ui="cinematic"] :is(.episodeCard,.collFilm){border-radius:22px;background:var(--c-surface-plus);border:1px solid var(--c-line)}
+:root[data-ui="cinematic"] .episodeArt img{opacity:.8}
+:root[data-ui="cinematic"] .episodeBody{padding:16px}
+:root[data-ui="cinematic"] .dlV18{padding:18px;border-radius:22px;gap:16px}
+:root[data-ui="cinematic"] .dlActions{display:flex;flex-wrap:wrap;gap:8px}
+:root[data-ui="cinematic"] .dlActions button{min-height:44px}
+@media(max-width:760px){
+ :root[data-ui="cinematic"] .welcome{padding:12px 0 18px}
+ :root[data-ui="cinematic"] .welcome h1{font-size:28px}
+ :root[data-ui="cinematic"] .cinematicHero{min-height:390px;align-items:flex-end;border-radius:24px}
+ :root[data-ui="cinematic"] .cinematicHeroArt{inset:0}
+ :root[data-ui="cinematic"] .cinematicHero:after{background:linear-gradient(0deg,#0d0f13 2%,rgba(13,15,19,.86) 35%,rgba(13,15,19,.05) 90%)}
+ :root[data-ui="cinematic"] .cinematicHeroCopy{width:100%;padding:24px 20px}
+ :root[data-ui="cinematic"] .cinematicHero h2{font-size:32px;margin:14px 0}
+ :root[data-ui="cinematic"] .cinematicHeroFacts{font-size:12px}
+ :root[data-ui="cinematic"] .cinematicHeroOverview{display:none}
+ :root[data-ui="cinematic"] .cinematicHeroActions{gap:8px;margin-top:18px}
+ :root[data-ui="cinematic"] .cinematicHeroActions button{flex:1;padding:0 14px}
+ :root[data-ui="cinematic"] .cinematicQuick{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
+ :root[data-ui="cinematic"] .cinematicQuick button{display:flex;align-items:center;gap:12px;padding:16px 12px;border-radius:18px;text-align:left}
+ :root[data-ui="cinematic"] .cinematicQuick :is(small,b){display:block}
+ :root[data-ui="cinematic"] .cinematicQuick small{font-size:10px;color:var(--g-muted);margin-bottom:5px}
+ :root[data-ui="cinematic"] .cinematicQuick b{font-size:12px}
+ :root[data-ui="cinematic"] .shelfCard{flex-basis:145px;border-radius:22px}
+ :root[data-ui="cinematic"] .resumeCard{flex-basis:260px}
+ :root[data-ui="cinematic"] :is(.card .content,.browseCardBody){padding:12px}
+ :root[data-ui="cinematic"] :is(.cardTop h3,.browseCardBody h3){font-size:13px}
+ :root[data-ui="cinematic"] .browseCardBody{min-height:138px}
+ :root[data-ui="cinematic"] .mobileNav button{min-height:48px}
+ :root[data-ui="cinematic"] .watchHero{grid-template-columns:90px minmax(0,1fr);gap:18px;min-height:340px;padding:68px 20px 24px}
+ :root[data-ui="cinematic"] .watchHeroText h1{font-size:28px}
+ :root[data-ui="cinematic"] .watchHeroActions{margin-left:-108px}
+ :root[data-ui="cinematic"] .watchHeroActions button{min-height:48px}
+ :root[data-ui="cinematic"] .watchEpisodeSection{padding:16px 20px 32px}
+ :root[data-ui="cinematic"] .episodeBody{padding:12px}
+}
+@media(hover:none) and (min-width:761px){
+ :root[data-ui="cinematic"] :is(button,.shelfCard):focus-visible{outline:4px solid var(--c-primary);outline-offset:4px;box-shadow:0 0 0 8px rgba(139,183,255,.15)}
+}
+@media(prefers-reduced-motion:reduce){:root[data-ui="cinematic"] *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Оболочка второго интерфейса: контурная графика, читаемые действия и отдельные уровни навигации. */
+:root[data-ui="cinematic"] .mhIcon{width:24px;height:24px}
+:root[data-ui="cinematic"] :is(.closeBtn,.watchClose,.drawerClose){width:52px;height:52px;min-height:52px;border-radius:18px;background:rgba(23,26,32,.9);border:1px solid var(--c-line-hi);color:var(--g-text);display:grid;place-items:center;backdrop-filter:blur(18px)}
+:root[data-ui="cinematic"] :is(.closeBtn,.watchClose,.drawerClose):hover{background:var(--c-surface-hi);border-color:var(--c-primary)}
+:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav,.removeFav,.cineProjectFavorite,.browseCard .browseCardActions .browseFav){width:48px;height:48px;min-height:48px;flex-shrink:0;padding:10px;display:grid;place-items:center;border-radius:16px;background:var(--c-fill-1);color:var(--g-text2);border:1px solid var(--c-line-hi)}
+:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav,.removeFav,.cineProjectFavorite,.browseCard .browseCardActions .browseFav).active{color:#ff8799;background:rgba(255,101,125,.14);border-color:rgba(255,101,125,.36)}
+:root[data-ui="cinematic"] button:disabled{opacity:.45;cursor:default;translate:none}
+:root[data-ui="cinematic"] :is(.primary,.libraryWatch,.browseOpen){background:var(--g-text);color:var(--c-canvas);box-shadow:none;border:0;min-height:48px;border-radius:28px;font-weight:600}
+:root[data-ui="cinematic"] :is(.primary,.libraryWatch,.browseOpen):hover{background:#fff;color:var(--c-canvas)}
+:root[data-ui="cinematic"] .browseCardActions{grid-template-columns:minmax(0,1fr) 48px;gap:10px}
+:root[data-ui="cinematic"] :is(.content p,.browseCardBody p){display:none}
+:root[data-ui="cinematic"] :is(.cardTop h3,.browseCardBody h3){min-height:40px;font-size:15px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+:root[data-ui="cinematic"] :is(.metaLine,.browseMeta){font-size:12px;color:var(--g-muted);line-height:1.6}
+:root[data-ui="cinematic"] .posterButton{aspect-ratio:2/3}
+:root[data-ui="cinematic"] .posterButton img{object-fit:cover}
+:root[data-ui="cinematic"] .cardTop{align-items:flex-start;gap:12px}
+:root[data-ui="cinematic"] .cardTitleBtn{padding:0;text-align:left;background:transparent;font-size:inherit;font-weight:600}
+:root[data-ui="cinematic"] .resumeCard{aspect-ratio:16/11;overflow:hidden}
+:root[data-ui="cinematic"] .resumeCard .shelfTitle{bottom:40px;font-size:15px}
+:root[data-ui="cinematic"] .resumeCard .shelfMeta{bottom:18px}
+:root[data-ui="cinematic"] #mediaModal{padding:0;background:var(--c-canvas);backdrop-filter:none}
+:root[data-ui="cinematic"] #mediaModal .detailbox{width:100%;max-width:none;height:100dvh;max-height:100dvh;border:0;border-radius:0;padding:80px 48px 48px;background:var(--c-surface)}
+:root[data-ui="cinematic"] .mediaDetailGrid{grid-template-columns:240px minmax(0,1fr);gap:36px;padding-right:0}
+:root[data-ui="cinematic"] .detailPoster{border-radius:22px}
+:root[data-ui="cinematic"] .detailTitleRow h1{font-size:clamp(28px,4vw,52px);line-height:1.1}
+:root[data-ui="cinematic"] .detailTitleRow{padding-right:0!important;gap:24px}
+:root[data-ui="cinematic"] .detailText>p{font-size:16px;line-height:1.8;color:var(--g-text2);max-width:840px}
+:root[data-ui="cinematic"] :is(.detailFacts span,.genrePills span){font-size:12px;padding:8px 12px;border-radius:12px}
+:root[data-ui="cinematic"] .detailReleases{padding-top:28px;border-top:1px solid var(--c-line)}
+:root[data-ui="cinematic"] :is(.watchHeroActions,.detailText){gap:12px}
+:root[data-ui="cinematic"] .watchHeroText p{font-size:16px;line-height:1.8}
+:root[data-ui="cinematic"] .watchHeroActions button{min-height:48px}
+:root[data-ui="cinematic"] .watchHeroActions .cineProjectFavorite{padding:10px}
+:root[data-ui="cinematic"] .watchClose{top:18px;right:24px}
+:root[data-ui="cinematic"] :is(.setupCard,.sourceState,.svc,.qualityShow,.healthCard){padding:20px;border-radius:22px}
+:root[data-ui="cinematic"] .dlV18{align-items:start}
+:root[data-ui="cinematic"] .dlV18 b{font-size:17px;line-height:1.4}
+:root[data-ui="cinematic"] .dlV18 small{font-size:12px;line-height:1.7}
+/* Управление видео — те же кнопки, что у нативного «Кино», без изменения классического HUD. */
+:root[data-ui="cinematic"] .wpHead{padding:24px 28px 65px;background:linear-gradient(#000b,transparent)}
+:root[data-ui="cinematic"] .wpHeading b{font-size:24px;line-height:1.3}
+:root[data-ui="cinematic"] .wpBottom{padding:70px 28px 24px;background:linear-gradient(transparent,#000e)}
+:root[data-ui="cinematic"] .wpControls{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+:root[data-ui="cinematic"] .wpTransport{display:flex;align-items:center;gap:10px;padding:8px;background:rgba(13,15,19,.7);border:1px solid var(--c-line-hi);border-radius:28px;backdrop-filter:blur(18px)}
+:root[data-ui="cinematic"] .wpActions{display:flex;align-items:center;gap:10px}
+:root[data-ui="cinematic"] .wpIconBtn{width:52px;min-width:52px;height:52px;min-height:52px;padding:12px;border:1px solid var(--c-line-hi);border-radius:18px;background:rgba(23,26,32,.92);color:var(--g-text);backdrop-filter:blur(18px)}
+:root[data-ui="cinematic"] .wpIconBtn:hover{background:var(--c-surface-hi);border-color:var(--c-primary)}
+:root[data-ui="cinematic"] #wpPlay{background:var(--g-text);color:var(--c-canvas);border:0;border-radius:22px}
+:root[data-ui="cinematic"] :is(#wpBackTen,#wpForwardTen){position:relative}
+:root[data-ui="cinematic"] :is(#wpBackTen,#wpForwardTen):after{content:"10";position:absolute;right:2px;bottom:2px;font-size:9px;background:var(--c-surface-plus);border-radius:4px;padding:1px 3px;color:var(--g-text)}
+:root[data-ui="cinematic"] .wpNextBtn{width:auto;gap:8px}
+:root[data-ui="cinematic"] .wpTime{font-size:12px;min-width:112px;font-variant-numeric:tabular-nums;padding:0 8px}
+:root[data-ui="cinematic"] .wpCenterPlay{width:84px;height:84px;border-radius:28px;background:rgba(236,239,244,.94);color:var(--c-canvas);border:1px solid #fff5;box-shadow:0 16px 60px #0008}
+:root[data-ui="cinematic"] .wpCenterPlay .mhIcon{width:36px;height:36px}
+:root[data-ui="cinematic"] .wpDrawer{top:24px;right:24px;bottom:24px;width:420px;max-width:calc(100% - 48px);max-height:none;border:1px solid var(--c-line-hi);border-radius:28px;background:rgba(13,15,19,.97);backdrop-filter:blur(24px);padding:24px;box-shadow:var(--c-shadow-lift)}
+:root[data-ui="cinematic"] .wpDrawerHead h2{font-size:26px}
+:root[data-ui="cinematic"] .wpOptions label{font-size:13px;line-height:1.5;color:var(--g-text2)}
+:root[data-ui="cinematic"] .wpOptions select{min-height:48px;padding:10px;margin-top:8px}
+:root[data-ui="cinematic"] .wpEpisode{border-radius:18px;border:1px solid var(--c-line);background:var(--c-surface-plus);padding-bottom:12px}
+:root[data-ui="cinematic"] .wpEpisode.current{border-color:var(--c-primary)}
+:root[data-ui="cinematic"] .wpEpisode :is(b,small){padding:0 12px}
+:root[data-ui="cinematic"] .wpSkip{position:absolute;right:28px;top:45%;display:flex;align-items:center;gap:10px;min-height:52px;border:1px solid #fff4;border-radius:28px;background:var(--g-text);color:var(--c-canvas);padding:12px 22px;font-weight:600;z-index:4}
+:root[data-ui="cinematic"] .wpSkip[hidden]{display:none!important}
+:root[data-ui="cinematic"] .wpChapterList{display:grid;gap:10px}
+:root[data-ui="cinematic"] .cineChapter{display:flex;gap:12px;align-items:center;min-height:56px;padding:12px;border:1px solid var(--c-line);text-align:left;background:var(--c-surface-plus);border-radius:16px}
+:root[data-ui="cinematic"] .cineChapter b{flex:1;font-weight:500}
+:root[data-ui="cinematic"] .cineChapter span{color:var(--c-primary);font-variant-numeric:tabular-nums;font-size:12px}
+@media(min-width:1200px) and (hover:hover){
+ :root[data-ui="cinematic"] .sideNav,:root[data-ui="cinematic"] .sideNav:is(:hover,:has(:focus-visible)){width:210px;background:rgba(8,9,11,.84);box-shadow:none}
+ :root[data-ui="cinematic"] .sideNav button b{opacity:1;transform:none;font-size:13px}
+ :root[data-ui="cinematic"] .sideNav button{min-height:48px;height:48px}
+ :root[data-ui="cinematic"] main{margin-left:210px}
+}
+@media(max-width:760px){
+ :root[data-ui="cinematic"] #mediaModal .detailbox{padding:80px 20px 32px}
+ :root[data-ui="cinematic"] .mediaDetailGrid{grid-template-columns:88px minmax(0,1fr);gap:18px}
+ :root[data-ui="cinematic"] .detailTitleRow{display:block}
+ :root[data-ui="cinematic"] .detailTitleRow h1{font-size:26px}
+ :root[data-ui="cinematic"] .heartLarge{margin-top:14px}
+ :root[data-ui="cinematic"] .detailText>p{font-size:14px;line-height:1.7}
+ :root[data-ui="cinematic"] .detailPoster{max-width:88px}
+ :root[data-ui="cinematic"] .browseCardActions{grid-template-columns:minmax(0,1fr) 44px;gap:6px}
+ :root[data-ui="cinematic"] .browseFav{width:44px;height:48px}
+ :root[data-ui="cinematic"] :is(.cardTop h3,.browseCardBody h3){font-size:13px}
+ :root[data-ui="cinematic"] .heartBtn{width:36px;height:40px;min-height:40px;padding:7px}
+ :root[data-ui="cinematic"] .wpHead{padding:16px 16px 48px}
+ :root[data-ui="cinematic"] .wpHeading b{font-size:18px}
+ :root[data-ui="cinematic"] .wpBottom{padding:48px 12px 16px}
+ :root[data-ui="cinematic"] .wpControls{gap:8px}
+ :root[data-ui="cinematic"] .wpTransport{gap:4px;padding:4px;flex-wrap:wrap}
+ :root[data-ui="cinematic"] .wpActions{gap:6px;flex-wrap:wrap}
+ :root[data-ui="cinematic"] .wpIconBtn{width:48px;min-width:48px;height:48px;min-height:48px;padding:10px}
+ :root[data-ui="cinematic"] .wpNextBtn span{display:none}
+ :root[data-ui="cinematic"] .wpTime{min-width:102px}
+ :root[data-ui="cinematic"] .wpDrawer{top:12px;right:12px;bottom:12px;width:380px;max-width:calc(100% - 24px);padding:18px}
+ :root[data-ui="cinematic"] .wpSkip{top:36%;right:12px;font-size:12px;padding:10px 16px}
+}
+/* Перемотка доступна и на телефоне; классический плеер сохраняет прежнее правило. */
+:root[data-ui="cinematic"] .wpSeekBtn{display:inline-flex!important}
+@media(max-width:650px){
+ :root[data-ui="cinematic"] .webPlayerBox{min-height:min(420px,calc(100dvh - 24px));aspect-ratio:auto}
+ :root[data-ui="cinematic"] .wpTime{width:100%;text-align:center}
+ :root[data-ui="cinematic"] .wpVolumeGroup{display:none}
+ :root[data-ui="cinematic"] .wpTransport{justify-content:center}
+}
+
+/* 22.15: вся доступная ширина, читаемые подписи и спокойные переходы. */
+:root[data-ui="cinematic"] :is(.primary,.setupPrimary,.softBtn,.openCard,.libraryWatch,.browseOpen,.releaseOpen,.upgradeBtn,.sectionMore,.hubQuickLinks a,.watchHeroActions button,.detailText>.primary,.detailText>.softBtn,.dialogActions button){border-radius:12px}
+:root[data-ui="cinematic"] :is(.openCard,.libraryWatch,.browseOpen,.watchHeroActions button,.dialogActions button){width:auto;height:auto;white-space:normal;overflow-wrap:anywhere;line-height:1.4;padding:12px 18px}
+:root[data-ui="cinematic"] :is(.openCard.wide,.libraryWatch.wide){width:100%}
+:root[data-ui="cinematic"] .cardTop{grid-template-columns:minmax(0,1fr) 48px}
+:root[data-ui="cinematic"] :is(.cardTop h3,.browseCardBody h3){display:block;overflow:visible;min-height:0;max-height:none;-webkit-line-clamp:unset;overflow-wrap:anywhere}
+:root[data-ui="cinematic"] .libraryCard .cardTitleBtn{display:block;width:100%;max-height:none;min-height:0;padding:0;border:0;border-radius:0;white-space:normal;overflow:visible;overflow-wrap:anywhere;background:transparent;line-height:inherit;-webkit-line-clamp:unset}
+:root[data-ui="cinematic"] :is(.card,.browseCard,.shelfCard,.episodeCard):hover{transform:none;translate:none}
+:root[data-ui="cinematic"] .primary:hover{translate:none}
+:root[data-ui="cinematic"] .modal:not(.hidden)>:is(.modalbox,.detailbox){animation-duration:.16s;animation-timing-function:ease-out;animation-fill-mode:none}
+@media(min-width:761px){.topbar .mobileMenuBtn,:root[data-ui="cinematic"] .topbar .mobileMenuBtn{display:none}}
+@media(max-width:760px){:root[data-ui="cinematic"] .cardTop{grid-template-columns:minmax(0,1fr) 36px}}
+
+/* 22.16: одинаковая композиция карточек, независимо от длины названия. */
+:root[data-ui="cinematic"] :is(.grid,.libraryShelf,.browseGrid){align-items:stretch}
+:root[data-ui="cinematic"] :is(.card,.browseCard){display:flex;flex-direction:column;height:100%}
+:root[data-ui="cinematic"] :is(.card .content,.browseCardBody){display:flex;flex-direction:column;flex:none;height:216px;min-height:216px;gap:10px;position:relative}
+:root[data-ui="cinematic"] .cardTop{min-height:63px;height:63px;flex:none}
+:root[data-ui="cinematic"] .cardTop h3:only-child{grid-column:1/-1}
+:root[data-ui="cinematic"] :is(.cardTop h3,.browseCardBody h3){height:63px;min-height:63px;max-height:63px;flex:none;line-height:21px;margin:0;overflow:hidden}
+:root[data-ui="cinematic"] .cardTitleBtn,:root[data-ui="cinematic"] .libraryCard .cardTitleBtn,:root[data-ui="cinematic"] .browseCardBody h3{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;max-height:63px;min-height:0;line-height:21px;overflow-wrap:anywhere}
+:root[data-ui="cinematic"] :is(.metaLine,.browseMeta){height:30px;min-height:30px;max-height:30px;flex:none;overflow:hidden}
+:root[data-ui="cinematic"] :is(.card .content>.wide,.browseCardActions){margin-top:auto;flex:none}
+:root[data-ui="cinematic"] :is(.card .content>.wide,.browseCardActions button){height:52px;min-height:52px;max-height:52px;padding:6px 10px;font-size:13px;line-height:18px}
+:root[data-ui="cinematic"] .collProgress{margin:0;height:3px;flex:none}
+@media(max-width:760px){
+ :root[data-ui="cinematic"] :is(.card .content,.browseCardBody){height:198px;min-height:198px;gap:8px}
+ :root[data-ui="cinematic"] .cardTop{height:54px;min-height:54px}
+ :root[data-ui="cinematic"] :is(.cardTop h3,.browseCardBody h3){height:54px;min-height:54px;max-height:54px;line-height:18px}
+ :root[data-ui="cinematic"] .cardTitleBtn,:root[data-ui="cinematic"] .libraryCard .cardTitleBtn,:root[data-ui="cinematic"] .browseCardBody h3{max-height:54px;line-height:18px}
+}
+
+/* 22.17: одна рамка для просмотра, редактирования проекта и выбора серий. */
+:root[data-ui="cinematic"] :is(#mediaModal,.watchProjectModal){display:flex;align-items:center;justify-content:center;padding:24px;overflow:hidden;background:rgba(4,5,7,.7);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+:root[data-ui="cinematic"] #mediaModal .detailbox,:root[data-ui="cinematic"] .watchProjectBox{width:min(1180px,100%);max-width:1180px;height:min(900px,calc(100dvh - 48px));min-height:0;max-height:calc(100dvh - 48px);margin:0;border:1px solid var(--c-line-hi);border-radius:26px;overflow:auto;scrollbar-gutter:stable;background:var(--c-surface);box-shadow:0 24px 80px rgba(0,0,0,.5);animation:none}
+:root[data-ui="cinematic"] #mediaModal .detailbox{padding:64px 32px 32px}
+:root[data-ui="cinematic"] .watchHero{grid-template-columns:180px minmax(0,1fr);gap:28px;min-height:340px;padding:64px 32px 28px}
+:root[data-ui="cinematic"] .watchHeroText h1{font-size:clamp(26px,3vw,43px);line-height:1.15}
+:root[data-ui="cinematic"] .watchEpisodeSection{padding:0 32px 32px}
+:root[data-ui="cinematic"] .mediaDetailGrid{grid-template-columns:180px minmax(0,1fr);gap:28px}
+:root[data-ui="cinematic"] .detailTitleRow h1{font-size:clamp(26px,3vw,43px);line-height:1.15}
+:root[data-ui="cinematic"] :is(.watchClose,#closeMedia){top:12px;right:16px;width:40px;height:40px;min-height:40px;border-radius:12px}
+@media(max-width:760px){
+ :root[data-ui="cinematic"] :is(#mediaModal,.watchProjectModal){padding:12px}
+ :root[data-ui="cinematic"] #mediaModal .detailbox,:root[data-ui="cinematic"] .watchProjectBox{width:100%;height:calc(100dvh - 24px);max-height:calc(100dvh - 24px);border-radius:20px}
+ :root[data-ui="cinematic"] #mediaModal .detailbox{padding:64px 18px 24px}
+ :root[data-ui="cinematic"] .watchHero{grid-template-columns:80px minmax(0,1fr);gap:16px;padding:64px 18px 24px;min-height:0}
+ :root[data-ui="cinematic"] .mediaDetailGrid{grid-template-columns:80px minmax(0,1fr);gap:16px}
+ :root[data-ui="cinematic"] :is(.watchHeroText h1,.detailTitleRow h1){font-size:24px}
+ :root[data-ui="cinematic"] .watchHeroActions{margin-left:-96px}
+ :root[data-ui="cinematic"] .watchEpisodeSection{padding:0 18px 24px}
+ :root[data-ui="cinematic"] .watchEpisodes{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+}
+
+/* 22.18: неброские горизонтальные действия и компактное избранное. */
+.cardActionGlyph{display:none}
+:root[data-ui="cinematic"] :is(.card .content>.wide,.browseOpen){display:flex;align-items:center;justify-content:center;gap:8px;height:40px;min-height:40px;max-height:40px;background:rgba(139,183,255,.07);color:#b8c9e2;border:1px solid rgba(139,183,255,.15);box-shadow:none;border-radius:10px}
+:root[data-ui="cinematic"] :is(.card .content>.wide,.browseOpen):hover{background:rgba(139,183,255,.14);border-color:rgba(139,183,255,.32);color:var(--g-text);box-shadow:none}
+:root[data-ui="cinematic"] .cardActionGlyph{display:block;width:20px;height:20px;flex:none}
+:root[data-ui="cinematic"] .cardActionText{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav,.removeFav,.cineProjectFavorite,.browseCard .browseCardActions .browseFav){display:flex;align-items:center;justify-content:center;width:32px;height:32px;min-height:32px;max-height:32px;min-width:32px;padding:6px;border:1px solid transparent;border-radius:9px;background:transparent;box-shadow:none;color:var(--g-muted)}
+:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav,.removeFav,.cineProjectFavorite) .mhIcon{width:18px;height:18px}
+:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav,.removeFav,.cineProjectFavorite,.browseCard .browseCardActions .browseFav):hover{background:rgba(255,255,255,.05);border-color:var(--c-line-hi);color:#d9b6c1}
+:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav,.removeFav,.cineProjectFavorite,.browseCard .browseCardActions .browseFav).active{background:rgba(255,101,125,.06);border-color:transparent;color:#d990a0}
+:root[data-ui="cinematic"] .browseCardActions{grid-template-columns:minmax(0,1fr) 32px;align-items:center;gap:8px}
+:root[data-ui="cinematic"] .cardTop{grid-template-columns:minmax(0,1fr) 32px;gap:8px}
+:root[data-ui="cinematic"] :is(.metaLine,.browseMeta){display:block;white-space:nowrap;text-overflow:ellipsis;line-height:18px;font-size:11px}
+:root[data-ui="cinematic"] .metaLine span+span:before{content:" · "}
+:root[data-ui="cinematic"] :is(.cinematicHeroActions,.watchHeroActions) .primary{background:rgba(139,183,255,.12);border:1px solid rgba(139,183,255,.22);color:#c9d9ef;box-shadow:none}
+:root[data-ui="cinematic"] :is(.cinematicHeroActions,.watchHeroActions) .primary:hover{background:rgba(139,183,255,.2);color:var(--g-text)}
+:root[data-ui="cinematic"] :is(.cinematicHeroActions,.watchHeroActions){align-items:center}
+@media(max-width:760px){:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav,.removeFav,.cineProjectFavorite,.browseCard .browseCardActions .browseFav){width:40px;height:40px;min-height:40px;max-height:40px;min-width:40px;padding:11px}:root[data-ui="cinematic"] .browseCardActions,:root[data-ui="cinematic"] .cardTop{grid-template-columns:minmax(0,1fr) 40px}}
+
+/* 22.21: независимые панели проекта и закрытие вне прокрутки. */
+.projectDialogShell{display:contents}
+:root[data-ui="cinematic"] .projectDialogShell{display:block;position:relative;width:min(1380px,100%);height:min(840px,calc(100dvh - 112px));min-width:0;min-height:0}
+:root[data-ui="cinematic"] .projectDialogShell>:is(.detailbox,.watchProjectBox){width:100%;max-width:none;height:100%;max-height:none;margin:0}
+:root[data-ui="cinematic"] .projectDialogShell>:is(#watchClose,#collClose,#closeMedia){position:absolute;top:-48px;right:0;width:40px;height:40px;min-height:40px;z-index:3;border-radius:12px;background:#20242b;border:1px solid var(--c-line-hi);box-shadow:0 4px 18px #0005}
+:root[data-ui="cinematic"] .projectDialogShell .watchHero{padding-top:28px}
+:root[data-ui="cinematic"] #mediaModal .projectDialogShell>.detailbox{padding-top:28px}
+:root[data-ui="cinematic"] .watchSingleMovie .watchSeasons{display:none}
+:root[data-ui="cinematic"] :is(.watchHeroText,.detailText,.detailSelectionPanel){min-width:0;overflow-wrap:anywhere}
+:root[data-ui="cinematic"] .watchHeroActions{flex-wrap:wrap}
+:root[data-ui="cinematic"] .watchEpisodeHead{flex-wrap:wrap;gap:16px;align-items:flex-start}
+:root[data-ui="cinematic"] .watchSeasons{flex-wrap:wrap;max-width:100%}
+:root[data-ui="cinematic"] .collFilm :is(b,small),:root[data-ui="cinematic"] .episodeBody :is(b,span,small){overflow:hidden;text-overflow:ellipsis}
+@media(min-width:1000px) and (min-height:620px){
+ :root[data-ui="cinematic"] .projectDialogShell>.watchProjectBox{display:grid;grid-template-columns:minmax(300px,.85fr) minmax(0,1.35fr);gap:0;overflow:hidden;scrollbar-gutter:auto}
+ :root[data-ui="cinematic"] .projectDialogShell .watchHero{display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;gap:20px;min-height:0;padding:28px;overflow:auto;scrollbar-gutter:stable;border-right:1px solid var(--c-line-hi)}
+ :root[data-ui="cinematic"] .projectDialogShell .watchBackdrop{position:absolute;inset:0;pointer-events:none}
+ :root[data-ui="cinematic"] .projectDialogShell :is(.watchPoster,.collHeroStack){width:128px;min-width:128px;max-width:128px;flex:none;align-self:flex-start}
+ :root[data-ui="cinematic"] .projectDialogShell .watchHeroText{position:relative;width:100%;flex:none}
+ :root[data-ui="cinematic"] .projectDialogShell :is(.watchHeroText h1,.detailTitleRow h1){font-size:clamp(24px,2.1vw,32px);line-height:1.22}
+ :root[data-ui="cinematic"] .projectDialogShell .watchHeroText>p{font-size:14px;line-height:1.7}
+ :root[data-ui="cinematic"] .projectDialogShell .watchEpisodeSection{min-height:0;min-width:0;padding:28px;overflow:auto;scrollbar-gutter:stable}
+ :root[data-ui="cinematic"] .projectDialogShell :is(.watchEpisodes,.collFilms){grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+ :root[data-ui="cinematic"] .projectDialogShell .watchSingleMovie .watchEpisodes{grid-template-columns:minmax(0,1fr);max-width:400px}
+ :root[data-ui="cinematic"] #mediaModal .projectDialogShell>.detailbox{padding:0;overflow:hidden;scrollbar-gutter:auto}
+ :root[data-ui="cinematic"] #mediaDetail{display:grid;grid-template-columns:minmax(300px,.85fr) minmax(0,1.35fr);height:100%;min-height:0}
+ :root[data-ui="cinematic"] .projectDialogShell .mediaDetailGrid{display:flex;flex-direction:column;gap:20px;min-height:0;padding:28px;overflow:auto;scrollbar-gutter:stable;border-right:1px solid var(--c-line-hi)}
+ :root[data-ui="cinematic"] .projectDialogShell .detailPoster{width:128px;max-width:128px;flex:none}
+ :root[data-ui="cinematic"] .detailSelectionPanel{padding:28px;min-height:0;overflow:auto;scrollbar-gutter:stable}
+ :root[data-ui="cinematic"] .detailSelectionPanel>:first-child{margin-top:0}
+ :root[data-ui="cinematic"] .collEditRow{flex-wrap:wrap}
+}
+@media(max-width:760px){
+ :root[data-ui="cinematic"] .projectDialogShell{height:calc(100dvh - 112px);width:100%}
+ :root[data-ui="cinematic"] .projectDialogShell .watchHero{padding-top:24px}
+ :root[data-ui="cinematic"] #mediaModal .projectDialogShell>.detailbox{padding-top:24px}
+}
+
+:root[data-ui="cinematic"] #mediaModal .projectDialogShell>.detailbox{width:100%;max-width:none;height:100%;max-height:none}

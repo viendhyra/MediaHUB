@@ -41,7 +41,7 @@ done
 if grep -qE '^(MEDIAHUB_USER|MEDIAHUB_PASS)=' /etc/mediahub.env 2>/dev/null; then
   warn 'old MediaHub Basic Auth variables still present'
 else
-  ok 'built-in MediaHub Basic Auth removed'
+  ok 'MediaHub uses account sessions (first login: admin)'
 fi
 
 printf '\nPython syntax:\n'
@@ -54,10 +54,11 @@ rm -f /tmp/mediahub-compile.err
 
 printf '\nHTTP/API:\n'
 /opt/mediahub/venv/bin/python - <<'PY'
-import json, urllib.request
+import json, os, urllib.request, urllib.error
 for url in ['http://127.0.0.1:8090/','http://127.0.0.1:8090/api/version','http://127.0.0.1:8090/api/discovery-health','http://127.0.0.1:8090/api/setup/status','http://127.0.0.1:8090/api/setup/storage/disks','http://127.0.0.1:8090/api/browse/options?kind=movies']:
     try:
-        with urllib.request.urlopen(url,timeout=5) as r:
+        headers={'Authorization':'Bearer '+os.environ['MEDIAHUB_CHECK_TOKEN']} if os.environ.get('MEDIAHUB_CHECK_TOKEN') else {}
+        with urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=5) as r:
             print('[ OK ]',url,r.status)
             if url.endswith('/version'):
                 j=json.load(r); print('       version:',j.get('version'))
@@ -69,6 +70,8 @@ for url in ['http://127.0.0.1:8090/','http://127.0.0.1:8090/api/version','http:/
                 j=json.load(r); print('       pool:',j.get('name'),'configured:',j.get('configured'),'disks:',len(j.get('disks',[])))
             elif '/api/browse/options' in url:
                 j=json.load(r); print('       browse genres:',len(j.get('genres',[])),'moods:',len(j.get('moods',[])))
+    except urllib.error.HTTPError as e:
+        print('[ OK ]' if e.code==401 and '/api/' in url else '[FAIL]',url,'account login required' if e.code==401 else e)
     except Exception as e:
         print('[FAIL]',url,e)
 PY

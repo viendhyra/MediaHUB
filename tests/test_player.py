@@ -28,12 +28,12 @@ class PlayerTests(unittest.TestCase):
         self.db=root/'history.db';self.connections=[]
         def db():
             con=sqlite3.connect(self.db,check_same_thread=False);con.row_factory=sqlite3.Row
-            con.execute('create table if not exists playback_history(path text primary key,project text,position real,duration real,completed integer,signature text,updated_at real)')
+            con.execute('create table if not exists account_playback_history(user_id integer,path text,project text,position real,duration real,completed integer,signature text,updated_at real,primary key(user_id,path))')
             con.execute('create table if not exists library_cache(path text,title text,poster text,kind text,has_file integer)');self.connections.append(con);return con
         self.scope=dict(Path=Path,re=re,time=time,asyncio=asyncio,shutil=shutil,subprocess=subprocess,json=json,os=os,hashlib=hashlib,quote=quote,
             HTTPException=HTTPException,Form=Form,Query=Query,FileResponse=FileResponse,Response=Response,StreamingResponse=StreamingResponse,
             app=FastAPI(),MEDIA_ROOT=self.media,MOVIES_ROOT=self.media/'movies',TV_ROOT=self.media/'tv',ANIME_ROOT=self.media/'anime',
-            VIDEO_EXTS={'.mp4','.mkv','.webm'},PLAYER_PROBE_CACHE={},PLAYER_TRANSCODES=set(),cache_db=db,
+            VIDEO_EXTS={'.mp4','.mkv','.webm'},PLAYER_PROBE_CACHE={},PLAYER_TRANSCODES=set(),cache_db=db,auth_user_id=lambda:1,
             PLAYER_THUMB_ROOT=root/'previews',PLAYER_THUMB_LOCK=threading.Lock())
         tree=ast.parse((Path(__file__).resolve().parents[1]/'app.py').read_text(encoding='utf-8'))
         nodes=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and (n.name.startswith('player_') or n.name in {'safe_media_path','_project_root_for','_check_project_file'})]
@@ -99,7 +99,7 @@ class PlayerTests(unittest.TestCase):
         """Старая позиция в титрах отмечается просмотренной и предлагает следующую серию."""
         following=self.project/'Серия 02.mp4';following.write_bytes(b'next episode')
         with self.scope['cache_db']() as con:
-            con.execute('insert into playback_history values(?,?,?,?,?,?,?)',(str(self.video),str(self.project),1260,1440,0,self.scope['player_signature'](self.video),time.time()));con.commit()
+            con.execute('insert into account_playback_history values(?,?,?,?,?,?,?,?)',(1,str(self.video),str(self.project),1260,1440,0,self.scope['player_signature'](self.video),time.time()));con.commit()
         self.scope['library_files']=AsyncMock(return_value={'items':[{'path':str(f),'rel':f.name,'video':True} for f in (self.video,following)]})
         self.scope['player_probe']=lambda f:{'probeAvailable':False}
         self.assertEqual(self.client.get('/api/player/resume').json()['items'],[])
@@ -153,7 +153,7 @@ class PlayerTests(unittest.TestCase):
             proc=AsyncMock();proc.stdout.read.side_effect=[b'header',b'fragment']
             probe={'probeAvailable':True,'audio':[],'duration':100}
             with patch.dict(self.scope,player_probe=lambda f:probe,player_binary=lambda name:'ffmpeg',player_stop_process=AsyncMock(side_effect=asyncio.CancelledError)),patch.object(asyncio,'create_subprocess_exec',return_value=proc):
-                response=await self.scope['player_stream'](str(self.video),0,0,'auto')
+                response=await self.scope['player_stream'](str(self.video),0,0,'auto',bitrate=0,timeline='accurate')
                 await anext(response.body_iterator)
                 with self.assertRaises(asyncio.CancelledError):await response.body_iterator.aclose()
                 self.assertEqual(self.scope['PLAYER_TRANSCODES'],set())

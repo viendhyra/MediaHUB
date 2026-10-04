@@ -30,7 +30,9 @@ class LibraryPosterTests(unittest.TestCase):
         def detail(client,media,tmdb_id):
             hit=self.tmdb.get((media,tmdb_id))
             if isinstance(hit,Exception):raise hit
-            if hit is None:raise httpx.HTTPStatusError(404)
+            if hit is None:
+                if hasattr(httpx,'Request'):raise httpx.HTTPStatusError('Not found',request=httpx.Request('GET','http://test/'),response=httpx.Response(404))
+                raise httpx.HTTPStatusError(404)
             return hit
         def find(client,kind,title,year="",tmdb_id=None):
             self.searches.append(title);return None

@@ -16,7 +16,7 @@ class RemoteTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.media=Path(self.temp.name)/'media';self.project=self.media/'tv'/'Проект';self.project.mkdir(parents=True)
         self.video=self.project/'Серия 01.mp4';self.video.write_bytes(b'0'*64)
         (self.media/'tv'/'Другой').mkdir();self.other=self.media/'tv'/'Другой'/'Серия 01.mp4';self.other.write_bytes(b'0'*64)
-        self.scope=dict(Path=Path,time=time,asyncio=asyncio,HTTPException=HTTPException,Form=Form,Query=Query,app=FastAPI(),
+        self.scope=dict(Path=Path,time=time,asyncio=asyncio,HTTPException=HTTPException,Form=Form,Query=Query,app=FastAPI(),auth_user_id=lambda:1,
             MEDIA_ROOT=self.media,MOVIES_ROOT=self.media/'movies',TV_ROOT=self.media/'tv',ANIME_ROOT=self.media/'anime',VIDEO_EXTS={'.mp4','.mkv'})
         tree=ast.parse((Path(__file__).resolve().parents[1]/'app.py').read_text(encoding='utf-8'))
         names={'safe_media_path','is_media_root','_project_root_for','_check_project_file','player_file'}
