@@ -105,11 +105,11 @@
       <div class="tools">
         <button id="newBtn">✦ Новинки</button><button id="popularBtn">◉ Популярное</button><button id="trendingBtn">↗ В тренде</button>
         <button id="providerNewBtn">⌁ У поставщиков</button><button id="libraryBtn">▤ Библиотека</button>
-        <button id="rescanLibraryBtn" class="hidden">↻ Пересканировать библиотеку</button><select id="sort"><option value="title">По названию</option><option value="yd">Новые сначала</option><option value="ya">Старые сначала</option></select>
+        <button id="rescanLibraryBtn" class="hidden">↻ Пересканировать библиотеку</button><button id="collMakeBtn" class="hidden">▦ Собрать коллекцию</button><select id="sort"><option value="title">По названию</option><option value="yd">Новые сначала</option><option value="ya">Старые сначала</option></select>
         <span id="msg"></span>
       </div>
     </div>
-    <div id="catalogTitle" class="sectionTitle hidden"><h2>Карточки</h2></div><div id="cards" class="grid"></div>
+    <div id="catalogTitle" class="sectionTitle hidden"><h2>Карточки</h2></div><div id="cards" class="grid"></div><div id="collBar" class="collBar hidden"></div>
     <div id="providerTitle" class="sectionTitle hidden"><h2>Релизы в моих источниках</h2><span id="providerCount"></span></div><div id="providerResults" class="releaseGrid"></div>
   </div>
 </section>
@@ -513,6 +513,18 @@ function mhPosterFail(img){
 }
 window.mhPosterFail=mhPosterFail;
 function toast(s,b=false){let t=$("toast");t.textContent=s;t.className="toast show"+(b?" bad":"");clearTimeout(toast._t);toast._t=setTimeout(()=>t.className="toast",b?7000:3200)}
+// Подтверждения и ввод — в окне портала, а не системными confirm/prompt браузера.
+// Удаление и необратимые действия получают красную кнопку.
+function mhDialog(text,{input=null,ok="",danger=null}={}){return new Promise(done=>{
+ let risky=danger??/удал|необратим|сотр/i.test(text),back=document.createElement("div");
+ back.className="modal mhDialog";back.innerHTML=`<div class="modalbox" role="alertdialog" aria-modal="true"><p class="mhDialogText"></p>${input!==null?`<input class="mhDialogInput" autocomplete="off">`:""}<div class="dialogActions"><button class="softBtn" data-v="0">Отмена</button><button class="${risky?"dangerBtn solid":"primary"}" data-v="1">${esc(ok||(input!==null?"Готово":"Подтвердить"))}</button></div></div>`;
+ back.querySelector(".mhDialogText").textContent=text;let field=back.querySelector("input");if(field)field.value=input;
+ let prev=document.activeElement,finish=v=>{window.removeEventListener("keydown",key,true);back.remove();prev?.focus?.();done(input!==null?(v?field.value:null):v)};
+ let key=e=>{if(e.key==="Escape"){e.preventDefault();e.stopImmediatePropagation();finish(false)}else if(e.key==="Enter"&&field&&document.activeElement===field){e.preventDefault();finish(true)}};
+ back.onclick=e=>{let b=e.target.closest("[data-v]");if(b)finish(b.dataset.v==="1");else if(e.target===back)finish(false)};
+ window.addEventListener("keydown",key,true);document.body.appendChild(back);(field||back.querySelector("[data-v='1']")).focus();if(field)field.select();
+})}
+const mhConfirm=(text,opts)=>mhDialog(text,opts),mhPrompt=(text,value="",opts={})=>mhDialog(text,{...opts,input:String(value??"")});
 function fmt(n){let u=["B","KB","MB","GB","TB"],i=0;n=Number(n||0);while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(1)+" "+u[i]}
 function fmtTime(sec){sec=Number(sec||0);if(!sec||sec>=8640000)return "—";let d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);return [d?d+"д":"",h?h+"ч":"",m?m+"м":""].filter(Boolean).join(" ")||"<1м"}
 function setKind(k){if(libraryMode&&k==="games")k="movies";kind=k;document.querySelectorAll(".type").forEach(x=>x.classList.toggle("active",x.dataset.kind===k));saveUI();refreshProviderSelect();if(libraryMode&&$("searchWorkspace")&&!$("searchWorkspace").classList.contains("hidden"))loadLibraryCached()}
@@ -544,7 +556,7 @@ function applyModeUI(){
  document.querySelector('[data-kind="games"]').classList.toggle("hidden",libraryMode);
  $("searchProvider").classList.toggle("hidden",libraryMode);$("newBtn").classList.toggle("hidden",libraryMode);
  $("popularBtn").classList.toggle("hidden",libraryMode);$("trendingBtn").classList.toggle("hidden",libraryMode);$("providerNewBtn").classList.toggle("hidden",libraryMode);
- $("libraryBtn").classList.toggle("hidden",libraryMode);$("rescanLibraryBtn").classList.toggle("hidden",!libraryMode);
+ $("libraryBtn").classList.toggle("hidden",libraryMode);$("rescanLibraryBtn").classList.toggle("hidden",!libraryMode);$("collMakeBtn").classList.toggle("hidden",!libraryMode||kind==="games");if(!libraryMode&&collSelect){collSelect=null;$("collBar").classList.add("hidden")}
  $("q").placeholder=libraryMode?"Поиск в моей библиотеке":"Название на русском или оригинальное";
 }
 function enterCatalog(){libraryMode=false;saveUI();applyModeUI();clearResults();$("searchCorrection").classList.add("hidden");if(activePage==="library"){activePage="search";markNav("search")}}
@@ -637,13 +649,99 @@ function clearResults(){$("cards").innerHTML="";$("providerResults").innerHTML="
 function sortNow(){let m=$("sort").value;current.sort((a,b)=>m==="yd"?(Number(b.year)||0)-(Number(a.year)||0):m==="ya"?(Number(a.year)||0)-(Number(b.year)||0):(a.title||"").localeCompare(b.title||"","ru"))}
 function ratingText(x){let v=Number(x.rating||0);return v?`★ ${v.toFixed(1)}`:""}
 function genreText(x){return Array.isArray(x.genres)?x.genres.filter(g=>typeof g==="string").slice(0,3).join(" · "):""}
+// Коллекции библиотеки: серия фильмов одной карточкой-стопкой. Состав хранится путями проектов.
+let libraryCollections=[],collSelect=null;
+const collPath=p=>String(p||"").replace(/[\\/]+$/,"");
+async function loadLibraryCollections(){try{let r=await fetch(`/api/collections?kind=${kind}`,{cache:"no-store"});libraryCollections=r.ok?((await r.json()).items||[]):[]}catch(e){libraryCollections=[]}}
+/** Фильмы коллекции, которые сейчас есть в библиотеке, по порядку коллекции. */
+function collMembers(c){let by=new Map(current.map(x=>[collPath(x.path),x]));return (c.items||[]).map(z=>({...z,item:by.get(collPath(z.path))})).filter(z=>z.item)}
+function collYears(list){let ys=list.map(z=>Number(z.item.year)).filter(Boolean);if(!ys.length)return "";let a=Math.min(...ys),b=Math.max(...ys);return a===b?String(a):`${a}–${b}`}
+function collOf(path){let p=collPath(path);return libraryCollections.find(c=>(c.items||[]).some(z=>collPath(z.path)===p))}
+/** Стопка из трёх постеров — сразу видно, что это несколько фильмов. */
+function collStackHtml(list,cls="collStack"){let top=list.slice(0,3);while(top.length<3)top.push(top[top.length-1]||null);return `<span class="${cls}">${top.map((z,k)=>`<span class="collLayer collLayer${3-k}">${posterImg(z?.item?.poster,z?.item?.title||"")}</span>`).reverse().join("")}</span>`}
+function collCardHtml(c){
+ let list=collMembers(c),n=list.length,watched=list.filter(z=>z.completed).length,years=collYears(list);
+ return `<article class="card libraryCard collCard"><button class="posterButton collPoster" data-cid="${c.id}" aria-label="Коллекция ${esc(c.title)}">${collStackHtml(list)}<span class="collBadge">Коллекция · ${n}</span></button><div class="content"><div class="cardTop"><h3><button class="cardTitleBtn" data-cid="${c.id}">${esc(c.title)}</button></h3></div><div class="metaLine"><span>${esc(years)}</span><span>${watched?`просмотрено ${watched} из ${n}`:`${n} ${plural(n,"фильм","фильма","фильмов")}`}</span></div><div class="collProgress"><i style="width:${n?Math.round(100*watched/n):0}%"></i></div><button class="libraryWatch primary wide" data-cid="${c.id}">Открыть коллекцию</button></div></article>`;
+}
+/** Режим выбора: карточки отмечаются по порядку, внизу — панель «Собрать коллекцию». */
+function startCollSelect(){collSelect={picked:[]};renderCatalog(current,true);toast("Отметь фильмы в нужном порядке")}
+function stopCollSelect(){collSelect=null;$("collBar").classList.add("hidden");renderCatalog(current,true)}
+function renderCollBar(){
+ let bar=$("collBar");$("collMakeBtn").textContent=collSelect?"✕ Выйти из выбора":"▦ Собрать коллекцию";
+ if(!collSelect){bar.classList.add("hidden");return}
+ let n=collSelect.picked.length,own=libraryCollections.filter(c=>c.kind===kind);
+ bar.innerHTML=`<div class="collBarText"><b>${n?`Выбрано: ${n}`:"Выбери фильмы"}</b><small>Порядок — как отмечаешь. Его можно поменять потом в коллекции.</small></div><div class="collBarActions">${own.length?`<select id="collAddTo"><option value="">Добавить в коллекцию…</option>${own.map(c=>`<option value="${c.id}">${esc(c.title)}</option>`).join("")}</select>`:""}<button id="collCreate" class="primary" ${n<2?"disabled":""}>Собрать коллекцию</button><button id="collCancel" class="softBtn">Отмена</button></div>`;
+ bar.classList.remove("hidden");
+ $("collCancel").onclick=stopCollSelect;
+ $("collCreate").onclick=async()=>{
+  let picked=collSelect.picked.map(p=>current.find(x=>collPath(x.path)===p)).filter(Boolean);
+  let name=await mhPrompt("Название коллекции",collSuggestName(picked.map(x=>x.title)),{ok:"Собрать"});if(name==null)return;
+  if(!name.trim())return toast("Укажи название коллекции",true);
+  await collSave("/api/collections",{kind,title:name.trim(),paths:JSON.stringify(collSelect.picked)});
+ };
+ if($("collAddTo"))$("collAddTo").onchange=async e=>{
+  let c=libraryCollections.find(z=>String(z.id)===e.target.value);if(!c)return;
+  if(!n){e.target.value="";return toast("Сначала отметь фильмы",true)}
+  let paths=[...(c.items||[]).map(z=>collPath(z.path)),...collSelect.picked.filter(p=>!(c.items||[]).some(z=>collPath(z.path)===p))];
+  await collSave(`/api/collections/${c.id}`,{paths:JSON.stringify(paths)});
+ };
+}
+async function collSave(url,fields){
+ let fd=new FormData();Object.entries(fields).forEach(([k,v])=>fd.append(k,v));
+ try{let r=await fetch(url,{method:"POST",body:fd}),j=await r.json();toast(j.message||j.detail||"Готово",!r.ok);if(!r.ok)return false;collSelect=null;$("collBar").classList.add("hidden");await loadLibraryCollections();renderCatalog(current,true);return true}
+ catch(e){toast("Не удалось сохранить коллекцию: "+e,true);return false}
+}
+/** Общее начало названий («Гарри Поттер и …» → «Гарри Поттер»). */
+function collSuggestName(titles){
+ let words=titles.map(t=>String(t||"").split(/\s+/).filter(Boolean)),common=[];
+ for(let i=0;words.length&&words.every(w=>w[i]);i++){let w=words.map(x=>x[i].toLowerCase().replace(/[.:,-]+$/,""));if(new Set(w).size!==1)break;common.push(words[0][i])}
+ while(common.length&&(common[common.length-1].replace(/[.:,-]+$/,"").length<=2||/^(and|the|of)$/i.test(common[common.length-1])))common.pop();
+ return common.join(" ").replace(/[.:,\s-]+$/,"")||titles[0]||"";
+}
+/** Окно коллекции: фильмы по порядку, продолжение просмотра, порядок и состав. */
+function openCollection(c,editing=false){
+ $("collModal")?.remove();
+ let list=collMembers(c),n=list.length,watched=list.filter(z=>z.completed).length;
+ let next=list.find(z=>z.position>5&&!z.completed)||list.find(z=>!z.completed)||list[0];
+ let modal=document.createElement("div");modal.id="collModal";modal.className="watchProjectModal";
+ modal.innerHTML=`<section class="watchProjectBox collView" role="dialog" aria-modal="true" aria-label="Коллекция"><button id="collClose" class="closeBtn watchClose" aria-label="Закрыть коллекцию"><svg class="mhIcon" aria-hidden="true"><use href="#ic-close"/></svg></button><div class="watchHero"><div class="watchBackdrop">${posterImg(list[0]?.item?.poster,c.title)}</div>${collStackHtml(list,"collStack collHeroStack")}<div class="watchHeroText"><span class="watchEyebrow eyebrow">Коллекция</span><h1>${esc(c.title)}</h1><div class="watchFacts">${n} ${plural(n,"фильм","фильма","фильмов")}${collYears(list)?" · "+esc(collYears(list)):""}</div><p>${watched?`Просмотрено ${watched} из ${n}.`:"Ещё ничего не смотрели."}${next&&n?` Дальше по порядку — «${esc(next.item.title)}».`:""}</p><div class="watchHeroActions">${next?`<button id="collContinue" class="primary">${next.position>5&&!next.completed?"Продолжить":"Смотреть"} · ${esc(next.item.title)}</button>`:""}<button id="collEditBtn" class="softBtn">${editing?"Готово":"Изменить"}</button></div><div class="collProgress collHeroProgress"><i style="width:${n?Math.round(100*watched/n):0}%"></i></div></div></div><div class="watchEpisodeSection"><div class="watchEpisodeHead"><div><span class="watchEyebrow eyebrow">По порядку</span><h2>Фильмы коллекции</h2></div></div>${editing?`<div class="collEditRow"><label class="mergeLabel">Название<input id="collTitle" value="${esc(c.title)}" autocomplete="off"></label><button id="collRename" class="softBtn">Переименовать</button><button id="collDisband" class="softBtn">Разобрать коллекцию</button></div>`:""}<div class="collFilms">${list.map((z,k)=>`<div class="collFilm ${z.completed?"watched":""}"><button class="collFilmOpen" data-k="${k}" title="${esc(z.item.title)}"><span class="collFilmArt">${posterImg(z.item.poster,z.item.title)}<span class="collFilmNo">${k+1}</span>${z.completed?'<span class="episodeState">Просмотрено</span>':z.progress?`<span class="episodeState">${z.progress}%</span>`:""}<span class="episodeProgress"><i style="width:${z.completed?100:z.progress}%"></i></span></span><b>${esc(z.item.title)}</b><small>${esc(z.item.year||"")}</small></button>${editing?`<div class="collFilmTools"><button class="softBtn" data-move="${k}" data-d="-1" ${k?"":"disabled"} aria-label="Раньше">↑</button><button class="softBtn" data-move="${k}" data-d="1" ${k<n-1?"":"disabled"} aria-label="Позже">↓</button><button class="softBtn" data-drop="${k}" aria-label="Убрать из коллекции">✕</button></div>`:""}</div>`).join("")||'<div class="watchEmpty">Фильмов коллекции сейчас нет в библиотеке.</div>'}</div></div></section>`;
+ document.body.append(modal);
+ let close=()=>modal.remove();$("collClose").onclick=close;modal.onclick=e=>{if(e.target===modal)close()};
+ if($("collContinue"))$("collContinue").onclick=()=>{close();openWebPlayer(next.item.path)};
+ modal.querySelectorAll(".collFilmOpen").forEach(b=>b.onclick=()=>{close();openWatchProject(list[+b.dataset.k].item)});
+ $("collEditBtn").onclick=()=>openCollection(c,!editing);
+ let paths=list.map(z=>collPath(z.path));
+ let saveOrder=async order=>{if(order.length<2){if(!await mhConfirm("В коллекции останется меньше двух фильмов — разобрать её? Фильмы останутся в библиотеке.",{ok:"Разобрать"}))return;return disband()}if(await collSave(`/api/collections/${c.id}`,{paths:JSON.stringify(order)})){let fresh=libraryCollections.find(z=>z.id===c.id);if(fresh)openCollection(fresh,true);else close()}};
+ let disband=async()=>{let fd=new FormData();let r=await fetch(`/api/collections/${c.id}/delete`,{method:"POST",body:fd}),j=await r.json();toast(j.message||j.detail,!r.ok);if(r.ok){close();await loadLibraryCollections();renderCatalog(current,true)}};
+ modal.querySelectorAll("[data-move]").forEach(b=>b.onclick=()=>{let k=+b.dataset.move,d=+b.dataset.d,o=[...paths];[o[k],o[k+d]]=[o[k+d],o[k]];saveOrder(o)});
+ modal.querySelectorAll("[data-drop]").forEach(b=>b.onclick=()=>{let o=paths.filter((_,k)=>k!==+b.dataset.drop);saveOrder(o)});
+ if($("collRename"))$("collRename").onclick=async()=>{let t=$("collTitle").value.trim();if(!t)return toast("Укажи название",true);if(await collSave(`/api/collections/${c.id}`,{title:t})){let fresh=libraryCollections.find(z=>z.id===c.id);if(fresh)openCollection(fresh,true)}};
+ if($("collDisband"))$("collDisband").onclick=async()=>{if(await mhConfirm(`Разобрать коллекцию «${c.title}»? Фильмы и файлы останутся в библиотеке, пропадёт только объединение.`,{ok:"Разобрать"}))disband()};
+}
 /** Показать спокойную витрину библиотеки с отдельным входом в просмотр. */
 function renderCatalog(items,lib=false){
  libraryMode=lib;current=items||[];sortNow();$("catalogTitle").classList.toggle("hidden",!current.length);
  $("cards").classList.toggle("libraryShelf",lib);
- $("cards").innerHTML=current.map((x,i)=>`<article class="card ${lib?'libraryCard':''}"><button class="posterButton" data-i="${i}" aria-label="${esc(x.title)}">${posterImg(x.poster,x.title)}${!lib&&Number(x.releasePrefetchCount||0)>0?`<span class="releaseWarmBadge" title="Релизы найдены заранее">↓ ${Number(x.releasePrefetchCount)}</span>`:""}<span class="posterShade"></span>${x.inLibrary?`<span class="ownedBadge gridOwned ${x.libraryStatus==='partial'?'partial':''}">${esc(x.libraryLabel||'В библиотеке')}</span>`:x.awaitingFiles||x.libraryStatus==='tracked'?'<span class="ownedBadge gridOwned trackedBadge">Ожидает файлов</span>':''}<span class="yearBadge">${esc(x.year||'')}</span>${lib&&x.path&&!x.awaitingFiles?'<span class="libraryPlayMark">▶</span>':''}</button><div class="content"><div class="cardTop"><h3><button class="cardTitleBtn" data-i="${i}">${esc(x.title)}</button></h3>${lib?'':`<button class="heartBtn" data-i="${i}" title="В избранное" aria-label="В избранное">${heartIcon(false)}</button>`}</div><div class="metaLine"><span>${ratingText(x)}</span><span>${esc(genreText(x))}</span></div>${lib?'':`<p>${esc((x.overview||'').slice(0,150))}</p>`}<button class="${lib&&x.path&&!x.awaitingFiles&&kind!=='games'?'libraryWatch primary':'openCard softBtn'} wide" data-i="${i}">${lib&&x.path&&!x.awaitingFiles&&kind!=='games'?'Смотреть':'Подробнее'}</button></div></article>`).join("");
- document.querySelectorAll("#cards .posterButton,#cards .cardTitleBtn,#cards .libraryWatch,#cards .openCard").forEach(b=>b.onclick=()=>{let x=current[+b.dataset.i];if(lib&&x.path&&!x.awaitingFiles&&kind!=="games")openWatchProject(x);else openMediaCard(x)});
+ // Фильмы коллекции (если их в библиотеке хотя бы два) прячутся за одной карточкой-стопкой.
+ let groups=lib&&!collSelect?libraryCollections.filter(c=>c.kind===kind).map(c=>({c,list:collMembers(c)})).filter(g=>g.list.length>=2):[];
+ let grouped=new Set(groups.flatMap(g=>g.list.map(z=>collPath(z.path))));
+ $("cards").innerHTML=groups.map(g=>collCardHtml(g.c)).join("")+current.map((x,i)=>grouped.has(collPath(x.path))?"":`<article class="card ${lib?'libraryCard':''}"><button class="posterButton" data-i="${i}" aria-label="${esc(x.title)}">${posterImg(x.poster,x.title)}${!lib&&Number(x.releasePrefetchCount||0)>0?`<span class="releaseWarmBadge" title="Релизы найдены заранее">↓ ${Number(x.releasePrefetchCount)}</span>`:""}<span class="posterShade"></span>${x.inLibrary?`<span class="ownedBadge gridOwned ${x.libraryStatus==='partial'?'partial':''}">${esc(x.libraryLabel||'В библиотеке')}</span>`:x.awaitingFiles||x.libraryStatus==='tracked'?'<span class="ownedBadge gridOwned trackedBadge">Ожидает файлов</span>':''}<span class="yearBadge">${esc(x.year||'')}</span>${lib&&x.path&&!x.awaitingFiles?'<span class="libraryPlayMark">▶</span>':''}</button><div class="content"><div class="cardTop"><h3><button class="cardTitleBtn" data-i="${i}">${esc(x.title)}</button></h3>${lib?'':`<button class="heartBtn" data-i="${i}" title="В избранное" aria-label="В избранное">${heartIcon(false)}</button>`}</div><div class="metaLine"><span>${ratingText(x)}</span><span>${esc(genreText(x))}</span></div>${lib?'':`<p>${esc((x.overview||'').slice(0,150))}</p>`}<button class="${lib&&x.path&&!x.awaitingFiles&&kind!=='games'?'libraryWatch primary':'openCard softBtn'} wide" data-i="${i}">${lib&&x.path&&!x.awaitingFiles&&kind!=='games'?'Смотреть':'Подробнее'}</button></div></article>`).join("");
+ document.querySelectorAll("#cards [data-cid]").forEach(b=>b.onclick=()=>{let c=libraryCollections.find(z=>z.id===+b.dataset.cid);if(c)openCollection(c)});
+ document.querySelectorAll("#cards .posterButton[data-i],#cards .cardTitleBtn[data-i],#cards .libraryWatch[data-i],#cards .openCard[data-i]").forEach(b=>b.onclick=()=>{let x=current[+b.dataset.i];if(lib&&x.path&&!x.awaitingFiles&&kind!=="games")openWatchProject(x);else openMediaCard(x)});
  document.querySelectorAll("#cards .heartBtn").forEach(b=>b.onclick=e=>{e.stopPropagation();addFavorite(current[+b.dataset.i],b)});
+ if(lib&&collSelect)decorateCollSelect();
+ if(lib)renderCollBar();
+}
+/** Режим выбора: номер по порядку отметки, принадлежность к коллекции, клик — отметить. */
+function decorateCollSelect(){
+ document.querySelectorAll("#cards article").forEach(a=>{
+  let i=a.querySelector("[data-i]")?.dataset.i;if(i==null)return;let x=current[+i],p=collPath(x.path);
+  if(!x.path||x.awaitingFiles){a.classList.add("collDisabled");return}
+  let k=collSelect.picked.indexOf(p),owner=collOf(p);
+  a.classList.add("collPickable");a.classList.toggle("collPicked",k>=0);
+  a.querySelector(".posterButton").insertAdjacentHTML("beforeend",`<span class="collPickMark">${k>=0?k+1:""}</span>${owner?`<span class="collMemberTag">«${esc(owner.title)}»</span>`:""}`);
+  a.querySelectorAll("[data-i]").forEach(b=>b.onclick=e=>{e.stopPropagation();let at=collSelect.picked.indexOf(p);if(at>=0)collSelect.picked.splice(at,1);else collSelect.picked.push(p);renderCatalog(current,true)});
+ });
 }
 function renderProviders(items){
  lastProviderResults=items||[];$("providerTitle").classList.toggle("hidden",!lastProviderResults.length);$("providerCount").textContent=lastProviderResults.length?lastProviderResults.length+" результатов":"";
@@ -693,14 +791,15 @@ $("searchForm").onsubmit=async e=>{
 $("sort").onchange=()=>renderCatalog(current,libraryMode);
 async function loadLibraryCached(){
  if(!libraryMode)return;
+ if(collSelect){collSelect=null;$("collBar").classList.add("hidden")}
  $("homeDashboard").classList.add("hidden");$("searchWorkspace").classList.remove("hidden");applyModeUI();
  searchBusy(true,"Открываем локальную библиотеку…");
  if(mergeTitlesCache)mergeTitlesCache.at=0;
- try{let r=await fetch(`/api/library-cached?kind=${kind}`,{cache:"no-store"}),j=await r.json();clearResults();renderCatalog(j,true);$("msg").textContent=`В библиотеке: ${j.length}`}finally{searchBusy(false)}
+ try{let [r]=await Promise.all([fetch(`/api/library-cached?kind=${kind}`,{cache:"no-store"}),loadLibraryCollections()]),j=await r.json();clearResults();renderCatalog(j,true);$("msg").textContent=`В библиотеке: ${j.length}`}finally{searchBusy(false)}
 }
 async function loadFeed(mode,source){clearResults();searchBusy(true,"Читаем сохранённый кэш…");try{let r=await fetch(`/api/feed?kind=${kind}&mode=${mode}&source=${source}`),j=await r.json();source==="catalog"?renderCatalog(j.map(x=>({...x,externalId:x.external_id,catalog:x.catalog_source||(kind==="anime"?"anilist":"tmdb")}))):renderProviders(j);$("msg").textContent=j.length?"Показано "+j.length:"Кэш пуст"}finally{searchBusy(false)}}
 $("newBtn").onclick=()=>loadFeed("new","catalog");$("popularBtn").onclick=()=>loadFeed("popular","catalog");$("trendingBtn").onclick=()=>loadFeed("trending","catalog");$("providerNewBtn").onclick=()=>loadFeed("new","providers");
-$("libraryBtn").onclick=()=>enterLibrary();$("rescanLibraryBtn").onclick=async()=>{let b=$("rescanLibraryBtn");b.disabled=true;b.textContent="Сканируем…";await fetch("/api/local-cache-refresh",{method:"POST"});setTimeout(async()=>{await loadLibraryCached();b.disabled=false;b.textContent="↻ Пересканировать библиотеку"},900)};
+$("libraryBtn").onclick=()=>enterLibrary();$("collMakeBtn").onclick=()=>collSelect?stopCollSelect():startCollSelect();$("rescanLibraryBtn").onclick=async()=>{let b=$("rescanLibraryBtn");b.disabled=true;b.textContent="Сканируем…";await fetch("/api/local-cache-refresh",{method:"POST"});setTimeout(async()=>{await loadLibraryCached();b.disabled=false;b.textContent="↻ Пересканировать библиотеку"},900)};
 
 // Карточки, которые уже открывали, держим в памяти: повторное открытие
 // рисуется мгновенно и полностью, а обновление идёт следом, без скелетона.
@@ -730,6 +829,29 @@ function restoreDetailState(st){
 }
 // Файлы проекта в карточке: список по папкам, переименование, перенос в
 // другой сезон и удаление. Удаление идёт тем же путём, что и в проводнике.
+// Несколько разных фильмов в одной папке (скачанная целиком коллекция) — предлагаем
+// разложить их по отдельным карточкам, как это делает организатор новых загрузок.
+async function loadCollectionSplit(x){
+ let box=$("collectionSplit"),path=x.path;
+ try{
+  let r=await fetch(`/api/library/collection-preview?path=${encodeURIComponent(path)}`),j=await r.json();
+  if(!r.ok||!j.parts?.length||$("collectionSplit")!==box)return;
+  let list=j.parts.map(p=>p.title+(p.year?` (${p.year})`:"")).join("\n");
+  box.innerHTML=`<b>Здесь коллекция: ${j.parts.length} ${plural(j.parts.length,"фильм","фильма","фильмов")}</b><small>${esc(j.parts.map(p=>p.title+(p.year?` (${p.year})`:"")).join(" · "))}</small><button id="collectionSplitBtn" class="softBtn">Разложить по карточкам</button>`;
+  box.classList.remove("hidden");
+  $("collectionSplitBtn").onclick=async()=>{
+   if(!await mhConfirm(`Разложить коллекцию по отдельным карточкам?\n\n${list}\n\nКаждый фильм переедет в свою папку «Название (Год)», у каждого будет свой постер и своё «Продолжить просмотр».`))return;
+   let b=$("collectionSplitBtn");b.disabled=true;b.textContent="Раскладываю…";
+   let fd=new FormData();fd.append("path",path);
+   try{
+    let r=await fetch("/api/library/split-collection",{method:"POST",body:fd}),j=await r.json();
+    toast(j.message||j.detail||"Готово",!r.ok);
+    if(r.ok){closeMediaCard();if(libraryMode)loadLibraryCached()}
+   }catch(e){toast("Разложить не удалось: "+e,true)}
+   finally{if($("collectionSplitBtn")){b.disabled=false;b.textContent="Разложить по карточкам"}}
+  };
+ }catch(e){}
+}
 async function loadProjectFiles(x){
  let fp=$("mediaDetail").querySelector(".filesPanel"),box=$("projectFiles");
  if(!fp||!box)return;
@@ -747,7 +869,7 @@ async function loadProjectFiles(x){
  const after=async()=>{fp.dataset.loaded="";await loadProjectFiles(x);if(libraryMode)loadLibraryCached()};
  box.querySelectorAll(".pfRename").forEach(b=>b.onclick=async()=>{
   let f=j.items[+b.dataset.i];
-  let name=prompt("Новое имя файла (расширение можно не писать):",f.name.replace(/\.[^.]+$/,""));
+  let name=await mhPrompt("Новое имя файла (расширение можно не писать):",f.name.replace(/\.[^.]+$/,""));
   if(name==null||!name.trim())return;
   let fd=new FormData();fd.append("path",f.path);fd.append("new_name",name.trim());
   b.disabled=true;
@@ -755,7 +877,7 @@ async function loadProjectFiles(x){
  });
  box.querySelectorAll(".pfSeason").forEach(b=>b.onclick=async()=>{
   let f=j.items[+b.dataset.i];
-  let n=prompt(`В какой сезон перенести «${f.name}»? Сейчас: ${f.season!=null?f.season:"корень проекта"}. Номер 0 — спецвыпуски.`,String(f.season||1));
+  let n=await mhPrompt(`В какой сезон перенести «${f.name}»? Сейчас: ${f.season!=null?f.season:"корень проекта"}. Номер 0 — спецвыпуски.`,String(f.season||1));
   if(n==null||n.trim()==="")return;
   n=Number(n);if(!Number.isInteger(n)||n<0||n>200)return toast("Номер сезона — от 0 до 200",true);
   let fd=new FormData();fd.append("path",f.path);fd.append("season",String(n));
@@ -809,7 +931,7 @@ async function bindMergePanel(x){
   if(!t)return toast("Выбери основной проект",true);
   let n=Number(season?.value||0);
   if(season&&season.value&&!(n>=1&&n<=200))return toast("Номер сезона — от 1 до 200",true);
-  if(!confirm(`Перенести файлы «${x.libraryTitle||x.title}» в проект «${t.title}»?\n\n${note.textContent}\n\nКарточка «${x.libraryTitle||x.title}» исчезнет из библиотеки.`))return;
+  if(!await mhConfirm(`Перенести файлы «${x.libraryTitle||x.title}» в проект «${t.title}»?\n\n${note.textContent}\n\nКарточка «${x.libraryTitle||x.title}» исчезнет из библиотеки.`))return;
   btn.disabled=true;btn.textContent="Переношу файлы…";
   let fd=new FormData();
   fd.append("kind",kind);
@@ -879,7 +1001,7 @@ function renderTracking(data){
  });
  document.querySelectorAll(".trackingDrop").forEach(b=>b.onclick=async()=>{
   let x=trackingData[+b.dataset.i];
-  if(!confirm(`Снять «${x.title}» с отслеживания? Тайтл будет удалён из ${x.source==="radarr"?"Radarr":x.source==="sonarr"?"Sonarr":"базы MediaHub"}. Скачанные файлы останутся на диске.`))return;
+  if(!await mhConfirm(`Снять «${x.title}» с отслеживания? Тайтл будет удалён из ${x.source==="radarr"?"Radarr":x.source==="sonarr"?"Sonarr":"базы MediaHub"}. Скачанные файлы останутся на диске.`))return;
   b.disabled=true;b.textContent="Убираю…";
   let r=await fetch(`/api/tracking/${x.kind}/${encodeURIComponent(x.itemKey)}`,{method:"DELETE"}),j=await r.json();
   toast(j.message||j.detail||"Готово",!r.ok);loadTracking();refreshTrackingBadge();
@@ -1105,10 +1227,11 @@ function renderMediaDetail(x,loading){
  // панели и введённое пользователем не должны при этом сбрасываться.
  let keep=detailRenderedToken===mediaCardToken?captureDetailState():null;
  detailRenderedToken=mediaCardToken;
- $("mediaDetail").innerHTML=`<div class="mediaDetailGrid"><div class="detailPoster">${posterImg(x.poster,x.title)}</div><div class="detailText">${libraryDetailHtml(x)}<div class="detailTitleRow"><div><h1>${esc(x.title||"")}</h1><div class="detailFacts">${factsHtml}</div></div><button id="favDetail" class="heartLarge" title="В избранное" aria-label="В избранное">${heartIcon(false)}</button></div>${genresHtml}${studio?`<div class="studioLine">${esc(studio)}</div>`:""}${overviewHtml}${x.path&&kind!=="games"?`<button id="watchMediaBtn" class="primary watchMediaBtn">Смотреть</button>`:""}${kind!=="games"&&((x.externalId||x.external_id)||loading)?`<button id="addMediaBtn" class="primary" ${x.tracked&&!x.inLibrary?"disabled":""}>${addLabel}</button>`:""}${(x.inLibrary||x.libraryItemKey||x.path)?`<details class="attachPage renamePanel"><summary><span class="attachPageIcon">${icon("ic-notes")}</span><b>Переименовать</b><small>изменить название карточки и папку</small></summary><div class="attachPageRow"><input id="renameTitle" placeholder="Новое название" autocomplete="off" value="${esc(x.libraryTitle||x.title||"")}"><button id="renameBtn" class="softBtn">Сохранить</button></div><label class="checkRow renameFolderRow"><input id="renameFolder" type="checkbox" checked> Переименовать и папку на диске</label></details>`:""}${x.path&&kind!=="games"?`<details id="mergePanel" class="attachPage mergePanel" ${openMergeFor===x.path?"open":""}><summary><span class="attachPageIcon">${icon("ic-library")}</span><b>Объединить с другим проектом</b><small>${kind==="movies"?"сложить файлы в папку другого фильма":"например, сезон, скачанный отдельной папкой"}</small></summary><div class="mergePanelBody"><label class="mergeLabel">Основной проект<select id="mergeTarget"><option value="">Загружаю список…</option></select></label>${kind!=="movies"?`<label class="mergeLabel">Сезон этой части<input id="mergeSeason" type="number" min="1" max="200" placeholder="авто"></label>`:""}<p id="mergeNote" class="mergeNote">Файлы этого проекта переедут в папку основного, а эта карточка исчезнет.</p><button id="mergeBtn" class="softBtn wide">Объединить</button></div></details>`:""}${x.path&&kind!=="games"?`<details class="attachPage filesPanel"><summary><span class="attachPageIcon">${icon("ic-folder")}</span><b>Файлы проекта</b><small id="projectFilesSummary">${x.videoCount?`${x.videoCount} видео · `:""}переименовать, сменить сезон, удалить</small></summary><div id="projectFiles" class="projectFiles"><div class="detailLoader"><span class="spinner"></span> Читаю папку…</div></div></details>`:""}${(x.inLibrary||x.libraryItemKey||x.path)?`<details class="attachPage deletePanel"><summary><span class="attachPageIcon">${icon("ic-trash")}</span><b>Удалить из библиотеки</b><small>${x.path?"карточку и файлы на диске":"карточку и отслеживание"}</small></summary><div class="deletePanelBody"><p class="deleteTarget">${x.path?`Будет удалено с диска: <code>${esc(x.path)}</code>`:"Пути на диске у карточки нет — уберём только карточку и отслеживание."}</p><label class="checkRow deleteOptRow"><input id="deleteWithFiles" type="checkbox" checked ${x.path?"":"disabled"}> Стереть файлы с диска</label><label class="checkRow deleteOptRow"><input id="deleteStopTracking" type="checkbox" checked> Снять с отслеживания, иначе ARR скачает заново</label><button id="deleteLibraryBtn" class="dangerBtn wide">Удалить из библиотеки</button></div></details>`:""}${kind!=="games"?`<details class="attachPage linkPanel"><summary><span class="attachPageIcon">${icon("ic-notes")}</span><b>Данные по ссылке</b><small>${x.sourceUrl?"карточка заполнена со страницы или вручную":"взять название, постер и описание со страницы"}</small></summary><div class="attachPageRow"><input id="attachPageUrl" placeholder="https://… страница тайтла" autocomplete="off" value="${esc(/^https?:/i.test(x.sourceUrl||"")?x.sourceUrl:"")}"><button id="attachPageBtn" class="softBtn">Подтянуть</button></div><div class="manualMetaBar">${/^https?:/i.test(x.sourceUrl||"")?`<a class="linkbtn attachPageSource" href="${esc(x.sourceUrl)}" target="_blank" rel="noopener">Открыть источник</a>`:""}<button id="manualMetaToggle" class="linkbtn" type="button">Заполнить вручную</button></div><div id="manualMetaForm" class="manualMeta hidden"><p class="mergeNote">Если сервер не может открыть сайт, перенеси данные со страницы сюда. Карточка будет показывать только их.</p><label class="mergeLabel">Название<input id="mmTitle" autocomplete="off" value="${esc(x.libraryTitle||x.title||"")}"></label><div class="manualMetaGrid"><label class="mergeLabel">Год<input id="mmYear" inputmode="numeric" maxlength="4" value="${esc(x.year||"")}"></label>${kind!=="movies"?`<label class="mergeLabel">Серий всего<input id="mmEpisodes" type="number" min="0" max="5000" value="${Number(x.episodesTotal||0)||""}"></label>`:""}</div><label class="mergeLabel">Постер — ссылка на картинку<input id="mmPoster" autocomplete="off" placeholder="https://…/poster.jpg" value="${esc(/^https?:/i.test(x.poster||"")?x.poster:"")}"></label><label class="mergeLabel">Жанры через запятую<input id="mmGenres" autocomplete="off" value="${esc((x.genres||[]).filter(g=>typeof g==="string").join(", "))}"></label><label class="mergeLabel">Описание<textarea id="mmOverview" rows="4">${esc(x.overview&&!/^Локальная медиатека/.test(x.overview)?x.overview:"")}</textarea></label><button id="mmSave" class="softBtn wide">Сохранить карточку</button></div></details>`:""}</div></div>${seasonMapHtml(x)}${collectionHtml(x)}<div class="detailReleases"><h2>Доступные релизы</h2><div class="detailLoader"><span class="spinner"></span> ${loading?"Открываем карточку…":"Проверяем заранее подготовленный кэш…"}</div></div>`;
+ $("mediaDetail").innerHTML=`<div class="mediaDetailGrid"><div class="detailPoster">${posterImg(x.poster,x.title)}</div><div class="detailText">${libraryDetailHtml(x)}<div class="detailTitleRow"><div><h1>${esc(x.title||"")}</h1><div class="detailFacts">${factsHtml}</div></div><button id="favDetail" class="heartLarge" title="В избранное" aria-label="В избранное">${heartIcon(false)}</button></div>${genresHtml}${studio?`<div class="studioLine">${esc(studio)}</div>`:""}${overviewHtml}${x.path&&kind!=="games"?`<button id="watchMediaBtn" class="primary watchMediaBtn">Смотреть</button>`:""}${x.path&&kind==="movies"&&Number(x.videoCount||0)!==1?`<div id="collectionSplit" class="collectionSplit hidden"></div>`:""}${kind!=="games"&&((x.externalId||x.external_id)||loading)?`<button id="addMediaBtn" class="${x.path&&kind!=="games"?"softBtn":"primary"}" ${x.tracked&&!x.inLibrary?"disabled":""}>${addLabel}</button>`:""}${(x.inLibrary||x.libraryItemKey||x.path)?`<details class="attachPage renamePanel"><summary><span class="attachPageIcon">${icon("ic-notes")}</span><b>Переименовать</b><small>изменить название карточки и папку</small></summary><div class="attachPageRow"><input id="renameTitle" placeholder="Новое название" autocomplete="off" value="${esc(x.libraryTitle||x.title||"")}"><button id="renameBtn" class="softBtn">Сохранить</button></div><label class="checkRow renameFolderRow"><input id="renameFolder" type="checkbox" checked> Переименовать и папку на диске</label></details>`:""}${x.path&&kind!=="games"?`<details id="mergePanel" class="attachPage mergePanel" ${openMergeFor===x.path?"open":""}><summary><span class="attachPageIcon">${icon("ic-library")}</span><b>Объединить с другим проектом</b><small>${kind==="movies"?"сложить файлы в папку другого фильма":"например, сезон, скачанный отдельной папкой"}</small></summary><div class="mergePanelBody"><label class="mergeLabel">Основной проект<select id="mergeTarget"><option value="">Загружаю список…</option></select></label>${kind!=="movies"?`<label class="mergeLabel">Сезон этой части<input id="mergeSeason" type="number" min="1" max="200" placeholder="авто"></label>`:""}<p id="mergeNote" class="mergeNote">Файлы этого проекта переедут в папку основного, а эта карточка исчезнет.</p><button id="mergeBtn" class="softBtn wide">Объединить</button></div></details>`:""}${x.path&&kind!=="games"?`<details class="attachPage filesPanel"><summary><span class="attachPageIcon">${icon("ic-folder")}</span><b>Файлы проекта</b><small id="projectFilesSummary">${x.videoCount?`${x.videoCount} видео · `:""}переименовать, сменить сезон, удалить</small></summary><div id="projectFiles" class="projectFiles"><div class="detailLoader"><span class="spinner"></span> Читаю папку…</div></div></details>`:""}${(x.inLibrary||x.libraryItemKey||x.path)?`<details class="attachPage deletePanel"><summary><span class="attachPageIcon">${icon("ic-trash")}</span><b>Удалить из библиотеки</b><small>${x.path?"карточку и файлы на диске":"карточку и отслеживание"}</small></summary><div class="deletePanelBody"><p class="deleteTarget">${x.path?`Будет удалено с диска: <code>${esc(x.path)}</code>`:"Пути на диске у карточки нет — уберём только карточку и отслеживание."}</p><label class="checkRow deleteOptRow"><input id="deleteWithFiles" type="checkbox" checked ${x.path?"":"disabled"}> Стереть файлы с диска</label><label class="checkRow deleteOptRow"><input id="deleteStopTracking" type="checkbox" checked> Снять с отслеживания, иначе ARR скачает заново</label><button id="deleteLibraryBtn" class="dangerBtn wide">Удалить из библиотеки</button></div></details>`:""}${kind!=="games"?`<details class="attachPage linkPanel"><summary><span class="attachPageIcon">${icon("ic-notes")}</span><b>Данные по ссылке</b><small>${x.sourceUrl?"карточка заполнена со страницы или вручную":"взять название, постер и описание со страницы"}</small></summary><div class="attachPageRow"><input id="attachPageUrl" placeholder="https://… страница тайтла" autocomplete="off" value="${esc(/^https?:/i.test(x.sourceUrl||"")?x.sourceUrl:"")}"><button id="attachPageBtn" class="softBtn">Подтянуть</button></div><div class="manualMetaBar">${/^https?:/i.test(x.sourceUrl||"")?`<a class="linkbtn attachPageSource" href="${esc(x.sourceUrl)}" target="_blank" rel="noopener">Открыть источник</a>`:""}<button id="manualMetaToggle" class="linkbtn" type="button">Заполнить вручную</button></div><div id="manualMetaForm" class="manualMeta hidden"><p class="mergeNote">Если сервер не может открыть сайт, перенеси данные со страницы сюда. Карточка будет показывать только их.</p><label class="mergeLabel">Название<input id="mmTitle" autocomplete="off" value="${esc(x.libraryTitle||x.title||"")}"></label><div class="manualMetaGrid"><label class="mergeLabel">Год<input id="mmYear" inputmode="numeric" maxlength="4" value="${esc(x.year||"")}"></label>${kind!=="movies"?`<label class="mergeLabel">Серий всего<input id="mmEpisodes" type="number" min="0" max="5000" value="${Number(x.episodesTotal||0)||""}"></label>`:""}</div><label class="mergeLabel">Постер — ссылка на картинку<input id="mmPoster" autocomplete="off" placeholder="https://…/poster.jpg" value="${esc(/^https?:/i.test(x.poster||"")?x.poster:"")}"></label><label class="mergeLabel">Жанры через запятую<input id="mmGenres" autocomplete="off" value="${esc((x.genres||[]).filter(g=>typeof g==="string").join(", "))}"></label><label class="mergeLabel">Описание<textarea id="mmOverview" rows="4">${esc(x.overview&&!/^Локальная медиатека/.test(x.overview)?x.overview:"")}</textarea></label><button id="mmSave" class="softBtn wide">Сохранить карточку</button></div></details>`:""}</div></div>${seasonMapHtml(x)}${collectionHtml(x)}<div class="detailReleases"><h2>Доступные релизы</h2><div class="detailLoader"><span class="spinner"></span> ${loading?"Открываем карточку…":"Проверяем заранее подготовленный кэш…"}</div></div>`;
  if(keep)restoreDetailState(keep);
  $("favDetail").onclick=()=>addFavorite(x,$("favDetail"));
  if($("watchMediaBtn"))$("watchMediaBtn").onclick=()=>{closeMediaCard();openWatchProject(x)};
+ if($("collectionSplit"))loadCollectionSplit(x);
  // Переименование скачанного тайтла: карточка и, по желанию, папка на диске.
  if($("renameBtn"))$("renameBtn").onclick=async()=>{
   let title=($("renameTitle").value||"").trim();
@@ -1215,6 +1338,21 @@ async function refreshWatchProject(){
   let resume=j.resume||j.items.find(f=>!f.completed)||j.items[0];
   $("watchContinue").disabled=!resume;$("watchContinue").textContent=resume?.position&&!resume.completed?`Продолжить с ${playerClock(resume.position)}`:"Начать просмотр";
   $("watchContinue").onclick=()=>{if(resume)openWebPlayer(owner.item.path,resume.path)};
+  // Фильм одним файлом — не сериал: без плиток «Видео 1», только прогресс и «С начала».
+  let movie=owner.item.kind==="movies",single=movie&&j.count===1,section=document.querySelector("#watchProjectModal .watchEpisodeSection");
+  section?.classList.toggle("hidden",single);
+  if(movie&&!single){let h=section?.querySelector("h2");if(h)h.textContent="Части фильма"}
+  if(single){
+   let f=j.items[0],started=f.position>5&&!f.completed;
+   $("watchSummary").innerHTML=`${f.completed?"Просмотрено":started?`Остановились на ${playerClock(f.position)} из ${playerClock(f.duration)}`:"Ещё не смотрели"} · ${esc(f.sizeHuman||"")}<span class="collProgress watchMovieProgress"><i style="width:${f.completed?100:f.progress||0}%"></i></span>`;
+   let again=$("watchRestart");
+   if((started||f.completed)&&!again){$("watchContinue").insertAdjacentHTML("afterend",'<button id="watchRestart" class="softBtn">С начала</button>');again=$("watchRestart")}
+   if(again)again.onclick=()=>{let fd=new FormData();fd.append("path",f.path);fd.append("position","0");fd.append("duration",String(f.duration||0));fetch("/api/player/progress",{method:"POST",body:fd}).finally(()=>openWebPlayer(owner.item.path,f.path))};
+   if(f.completed)$("watchContinue").textContent="Смотреть снова";
+  }
+  // Фильм из коллекции — ссылка на всю серию.
+  let coll=movie?collOf(owner.item.path):null,hero=document.querySelector("#watchProjectModal .watchHeroText");
+  if(coll&&hero&&!$("watchColl")){let list=coll.items||[],at=list.findIndex(z=>collPath(z.path)===collPath(owner.item.path));hero.querySelector(".watchFacts")?.insertAdjacentHTML("afterend",`<button id="watchColl" class="collLink">▦ Коллекция «${esc(coll.title)}» · ${at+1} из ${list.length}</button>`);$("watchColl").onclick=()=>{let c=coll;closeWatchProject();openCollection(c)}}
   let lastGroup=[...groups].find(([n,list])=>list.some(f=>f.path===j.last?.path)),lastIndex=lastGroup?lastGroup[1].findIndex(f=>f.path===j.last.path)+1:0;
   $("watchLast").textContent=j.last?`Последний просмотр: ${lastGroup?.[0]?'Сезон '+lastGroup[0]+' · ':''}${owner.item.kind==='movies'?'Видео':'Серия'} ${lastIndex} · ${j.last.completed?'просмотрено':playerClock(j.last.position)+' из '+playerClock(j.last.duration)}`:"Выбери серию и начни просмотр. Позиция сохранится автоматически.";
   $("watchSeasons").innerHTML=[...groups].sort((a,b)=>a[0]-b[0]).map(([n,list])=>`<button class="watchSeason ${n===owner.season?'active':''}" data-season="${n}">${n?'Сезон '+n:'Видео'}<span>${list.length}</span></button>`).join("");
@@ -1231,7 +1369,7 @@ function renderWatchEpisodes(){
 /** Открыть отдельную страницу проекта, посвящённую просмотру серий. */
 async function openWatchProject(item){
  closeWatchProject();watchProject={item:{...item,kind:item.kind||kind},season:null};let modal=document.createElement('div');modal.id='watchProjectModal';modal.className='watchProjectModal';
- modal.innerHTML=`<section class="watchProjectBox" role="dialog" aria-modal="true" aria-label="Просмотр проекта"><button id="watchClose" class="watchClose" aria-label="Закрыть список серий">×</button><div class="watchHero"><div class="watchBackdrop">${posterImg(item.poster,item.title)}</div><div class="watchPoster">${posterImg(item.poster,item.title)}</div><div class="watchHeroText"><span class="watchEyebrow">МОЯ БИБЛИОТЕКА</span><h1>${esc(item.title||'Проект')}</h1><div class="watchFacts">${esc([item.year,genreText(item)].filter(Boolean).join(' · '))}</div><p>${esc(item.overview&&!item.overview.startsWith('/mnt/')?item.overview.slice(0,420):'Все скачанные серии, история и продолжение просмотра — в одном месте.')}</p><div class="watchHeroActions"><button id="watchContinue" class="primary" disabled>Подготавливаю просмотр…</button><button id="watchDetails" class="softBtn">О проекте</button></div><div id="watchSummary" class="watchSummary">Читаю медиатеку…</div></div></div><div class="watchEpisodeSection"><div class="watchEpisodeHead"><div><span class="watchEyebrow">СМОТРЕТЬ</span><h2>Серии и сезоны</h2></div><div id="watchSeasons" class="watchSeasons"></div></div><p id="watchLast" class="watchLast"></p><div id="watchEpisodes" class="watchEpisodes"><div class="watchEmpty">Загружаю серии…</div></div></div></section>`;
+ modal.innerHTML=`<section class="watchProjectBox" role="dialog" aria-modal="true" aria-label="Просмотр проекта"><button id="watchClose" class="closeBtn watchClose" aria-label="Закрыть список серий"><svg class="mhIcon" aria-hidden="true"><use href="#ic-close"/></svg></button><div class="watchHero"><div class="watchBackdrop">${posterImg(item.poster,item.title)}</div><div class="watchPoster">${posterImg(item.poster,item.title)}</div><div class="watchHeroText"><span class="watchEyebrow eyebrow">Моя библиотека</span><h1>${esc(item.title||'Проект')}</h1><div class="watchFacts">${esc([item.year,genreText(item)].filter(Boolean).join(' · '))}</div><p>${esc(item.overview&&!item.overview.startsWith('/mnt/')?item.overview.slice(0,420):'Все скачанные серии, история и продолжение просмотра — в одном месте.')}</p><div class="watchHeroActions"><button id="watchContinue" class="primary" disabled>Подготавливаю просмотр…</button><button id="watchDetails" class="softBtn">О проекте</button></div><div id="watchSummary" class="watchSummary">Читаю медиатеку…</div></div></div><div class="watchEpisodeSection"><div class="watchEpisodeHead"><div><span class="watchEyebrow eyebrow">Смотреть</span><h2>Серии и сезоны</h2></div><div id="watchSeasons" class="watchSeasons"></div></div><p id="watchLast" class="watchLast"></p><div id="watchEpisodes" class="watchEpisodes"><div class="watchEmpty">Загружаю серии…</div></div></div></section>`;
  document.body.append(modal);$("watchClose").onclick=closeWatchProject;modal.onclick=e=>{if(e.target===modal)closeWatchProject()};$("watchDetails").onclick=()=>{closeWatchProject();setKind(item.kind||kind);openMediaCard(item)};await refreshWatchProject();
 }
 let webPlayer=null,webPlayerToken=0;
@@ -1428,7 +1566,7 @@ async function deleteLibraryItem(x,opts,btn){
  let msg=withFiles
   ? `Удалить «${title}» из библиотеки и стереть с диска?\n\n${path}\n\nДействие нельзя отменить.`
   : `Убрать «${title}» из библиотеки? Файлы на диске останутся.`;
- if(!confirm(msg))return false;
+ if(!await mhConfirm(msg))return false;
  let old=btn?btn.textContent:"";
  if(btn){btn.disabled=true;btn.textContent="Удаляем…"}
  try{
@@ -1525,7 +1663,7 @@ $("grabBtn").onclick=async()=>{let b=$("grabBtn");b.disabled=true;b.textContent=
  let {r,j}=await sendGrab(false);
  // Формат, который не заиграет, сервер не пропускает. Спрашиваем один раз и,
  // если человек настаивает, отправляем повторно с явным согласием.
- if(r.status===409&&confirm((j.detail||"Формат не воспроизводится.")+"\n\nСкачать всё равно?")){
+ if(r.status===409&&await mhConfirm((j.detail||"Формат не воспроизводится.")+"\n\nСкачать всё равно?")){
   ({r,j}=await sendGrab(true));
  }
  // При ошибке показываем и причину Prowlarr, и результат прямой загрузки.
@@ -1569,7 +1707,7 @@ function formatCell(x){
 // Возвращает путь, куда после удаления нужно перейти, или null при отказе.
 async function deleteMediaPath(path,name,isDir,btn){
  let what=isDir?"папку «"+name+"» со всем содержимым":"файл «"+name+"»";
- if(!confirm(`Удалить ${what} с диска? Это действие нельзя отменить.`)) return null;
+ if(!await mhConfirm(`Удалить ${what} с диска? Это действие нельзя отменить.`)) return null;
  let old=btn?btn.textContent:"";
  if(btn){btn.disabled=true;btn.textContent="Удаляем…"}
  try{
@@ -1597,12 +1735,12 @@ async function loadBrowser(path){
    // Кнопки есть всегда: раньше у папки без распознанного видео не было ни
    // «Переместить», ни «Удалить», и с ней нельзя было ничего сделать.
    if(x.inLibrary) actions+='<span class="libraryBadge">В библиотеке</span>';
-   actions+=`<button class="importBtn" data-type="${x.type}" data-path="${esc(x.path)}" data-kind="${x.suggestedKind||"movies"}" data-title="${esc(x.suggestedTitle||x.name)}" data-season="${x.season||1}">${x.inLibrary?"Перенести заново":"Переместить"}</button>`;
+   actions+=`<button class="importBtn" data-type="${x.type}" data-path="${esc(x.path)}" data-kind="${x.suggestedKind||"movies"}" data-title="${esc(x.suggestedTitle||x.name)}" data-season="${x.season||1}" data-collection="${x.collection||0}">${x.inLibrary?"Перенести заново":"Переместить"}</button>`;
    if(x.canDelete!==false) actions+=`<button class="deleteFolder dangerBtn" data-path="${esc(x.path)}" data-name="${esc(x.name)}" data-dir="${x.type==="dir"?1:0}">Удалить</button>`;
-   return `<div class="fileRow"><div class="fname">${x.type==="dir"?"▣":"◫"} ${x.type==="dir"?`<button class="linkbtn browse" data-path="${esc(x.path)}">${esc(x.name)}</button>`:esc(x.name)}<small>${esc(x.path)}</small></div><div>${formatCell(x)}</div><div>${esc(x.sizeHuman)}</div><div>${x.type==="dir"?x.videos:(x.video?"1":"-")}</div><div class="fileActions">${actions}</div></div>`
+   return `<div class="fileRow"><div class="fname">${x.type==="dir"?"▣":"◫"} ${x.type==="dir"?`<button class="linkbtn browse" data-path="${esc(x.path)}">${esc(x.name)}</button>`:esc(x.name)}<small>${esc(x.path)}</small>${x.collection?`<small class="collectionHint">Коллекция: ${x.collection} ${plural(x.collection,"фильм","фильма","фильмов")} — в «Фильмах» каждому будет своя карточка</small>`:""}</div><div>${formatCell(x)}</div><div>${esc(x.sizeHuman)}</div><div>${x.type==="dir"?x.videos:(x.video?"1":"-")}</div><div class="fileActions">${actions}</div></div>`
  }).join(''):'<div class="emptyState">Папка пуста.</div>');
  document.querySelectorAll('.browse').forEach(b=>b.onclick=()=>loadBrowser(b.dataset.path));
- document.querySelectorAll('.importBtn').forEach(b=>b.onclick=()=>openImport(b.dataset.path,b.dataset.type,b.dataset.kind,b.dataset.title,+b.dataset.season||1));
+ document.querySelectorAll('.importBtn').forEach(b=>b.onclick=()=>openImport(b.dataset.path,b.dataset.type,b.dataset.kind,b.dataset.title,+b.dataset.season||1,+b.dataset.collection||0));
  document.querySelectorAll('.deleteFolder').forEach(b=>b.onclick=async()=>{
    let gone=await deleteMediaPath(b.dataset.path,b.dataset.name,b.dataset.dir==="1",b);
    if(gone!==null) loadBrowser(currentPath);
@@ -1629,11 +1767,14 @@ function importHint(){
  let k=$("importKind").value;
  let base="Будет выполнено перемещение без копирования. Исходная папка/файл исчезнет из загрузок.";
  let t=($("importTitle").value||"").trim()||"Название";
- $("importHint").textContent=k==="movies"
+ let parts=+($("importModal").dataset.collection||0);
+ $("importHint").textContent=k==="movies"&&parts>1
+   ? `${base} Это коллекция: ${parts} ${plural(parts,"фильм","фильма","фильмов")}. Каждый получит свою папку «Название (Год)» и свою карточку, поле «Название» не используется.`
+   : k==="movies"
    ? `${base} Фильму будет создана своя папка «${movieFolderName(t)||t}» — файл не останется в корне раздела.`
    : `${base} Файлы лягут в «${t}/Season ${String(Math.max(1,+$("importSeason").value||1)).padStart(2,"0")}».`;
 }
-function openImport(path,type,k,t,s){$("importPath").value=path;$("importType").value=type;$("importKind").value=k;$("importTitle").value=t;$("importSeason").value=s;$("modalTitle").textContent=type==="dir"?"Добавить папку":"Добавить файл";importHint();$("importModal").classList.remove("hidden")}
+function openImport(path,type,k,t,s,parts=0){$("importModal").dataset.collection=parts||0;$("importPath").value=path;$("importType").value=type;$("importKind").value=k;$("importTitle").value=t;$("importSeason").value=s;$("modalTitle").textContent=type==="dir"?"Добавить папку":"Добавить файл";importHint();$("importModal").classList.remove("hidden")}
 ["importKind","importTitle","importSeason"].forEach(id=>{let el=$(id);if(el)el.addEventListener("input",importHint)});
 $("doImport").onclick=async()=>{let fd=new FormData();fd.append("path",$("importPath").value);fd.append("kind",$("importKind").value);fd.append("title",$("importTitle").value);fd.append("season",$("importSeason").value);let ep=$("importType").value==="dir"?"/api/import-folder":"/api/import-file";let r=await fetch(ep,{method:"POST",body:fd}),j=await r.json();toast(j.message||j.detail,!r.ok);if(r.ok){$("importModal").classList.add("hidden");if(libraryMode&&kind===$("importKind").value)await loadLibraryCached();loadBrowser(currentPath)}};
 
@@ -1694,8 +1835,8 @@ async function loadDownloads(){
  $("downloads").innerHTML=!j.configured?"<div class='emptyState'>qBittorrent недоступен. Проверь «Настройки» → qBittorrent или настройки подключения.</div>":j.items.map(x=>`<article class="dl dlV18 ${x.meta?"hasMeta":""}">${x.meta?`<div class="dlPoster">${posterImg(x.meta.poster,x.meta.title||x.name)}</div>`:""}<div><b>${esc(x.meta?.title||x.name)}${x.meta?.year?` <small>${esc(x.meta.year)}</small>`:""}</b><small>${esc(x.category||"без категории")} · ${esc(x.state||"")}</small>${x.meta?.overview?`<p class="dlOverview">${esc(x.meta.overview.slice(0,180))}</p>`:""}${x.meta?.source_url?`<small><a class="linkbtn" href="${esc(x.meta.source_url)}" target="_blank" rel="noopener">Источник</a></small>`:""}</div><div><div class="bar"><span style="width:${x.progress}%"></span></div><small>Осталось ${fmt(x.amount_left)} · ETA ${fmtTime(x.eta)}</small></div><div>${x.progress}%<br><small>↓ ${fmt(x.dlspeed)}/s · ↑ ${fmt(x.upspeed)}/s<br>Seeds ${x.seeders??0} · Peers ${x.peers??0} · Ratio ${x.ratio??0}</small></div><div class="dlActions"><button class="pause" data-hash="${x.hash}">Пауза</button><button class="resume" data-hash="${x.hash}">Старт</button><button class="recheckDl" data-hash="${x.hash}">Проверить</button><button class="deleteDl dangerBtn" data-hash="${x.hash}">Убрать</button><button class="deleteDlFiles dangerBtn" data-hash="${x.hash}">Убрать с файлами</button></div></article>`).join("")||"<div class='emptyState'>Загрузок нет.</div>";
  document.querySelectorAll(".pause,.resume,.recheckDl,.deleteDl,.deleteDlFiles").forEach(b=>b.onclick=async()=>{
   let action=b.classList.contains("pause")?"pause":b.classList.contains("resume")?"resume":b.classList.contains("recheckDl")?"recheck":b.classList.contains("deleteDlFiles")?"delete-files":"delete";
-  if(action==="delete"&&!confirm("Убрать задачу из qBittorrent? Файлы на диске не удаляются."))return;
-  if(action==="delete-files"&&!confirm("Удалить задачу ВМЕСТЕ со скачанными файлами? Действие необратимо."))return;
+  if(action==="delete"&&!await mhConfirm("Убрать задачу из qBittorrent? Файлы на диске не удаляются."))return;
+  if(action==="delete-files"&&!await mhConfirm("Удалить задачу ВМЕСТЕ со скачанными файлами? Действие необратимо."))return;
   let fd=new FormData();fd.append("hashes",b.dataset.hash);fd.append("action",action);await fetch("/api/download-action",{method:"POST",body:fd});loadDownloads()});
  loadPendingTracked();
  if(!torrentProjects.length)loadTorrentProjects();
@@ -1830,7 +1971,7 @@ function renderNotes(){
   let state=n.status==="tracked"?'<span class="statePill running">Отслеживается</span>':n.status==="matched"?'<span class="statePill stopped">Есть совпадения</span>':n.status==="empty"?'<span class="statePill missing">Не найдено</span>':'<span class="statePill">Ищу…</span>';
   return `<section class="noteCard"><div class="noteHead"><div><b>${esc(n.text)}</b><small>${esc(n.kind==="movies"?"Фильм":n.kind==="tv"?"Сериал":"Аниме")} · ${n.created_at?new Date(n.created_at).toLocaleString():""}</small></div><div class="noteActions">${state}<button class="noteRefresh" data-n="${n.id}">Найти снова</button><button class="noteDelete dangerBtn" data-n="${n.id}">Удалить</button></div></div>${n.matched?`<div class="detailOwned"><span>✓</span><div><b>${esc(n.matched.title||"")}</b><small>${n.matched.tracked?"Отправлено в отслеживание":"Связано с карточкой"}</small></div></div>`:""}<div class="noteSuggestions">${sugg.length?sugg.map((s,i)=>noteSuggestionHtml(n,s,i)).join(""):'<p class="releaseCacheHint">Совпадений пока нет. Нажми «Найти снова».</p>'}</div></section>`;
  }).join("")||'<div class="emptyState">Заметок пока нет. Впиши название сверху — MediaHub найдёт его сам.</div>';
- document.querySelectorAll(".noteDelete").forEach(b=>b.onclick=async()=>{if(!confirm("Удалить заметку?"))return;await fetch("/api/notes/"+b.dataset.n,{method:"DELETE"});loadNotes()});
+ document.querySelectorAll(".noteDelete").forEach(b=>b.onclick=async()=>{if(!await mhConfirm("Удалить заметку?"))return;await fetch("/api/notes/"+b.dataset.n,{method:"DELETE"});loadNotes()});
  document.querySelectorAll(".noteRefresh").forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent="Ищу…";let r=await fetch(`/api/notes/${b.dataset.n}/refresh`,{method:"POST"}),j=await r.json();toast(j.message||"Обновлено",!r.ok);loadNotes()});
  document.querySelectorAll(".noteOpen").forEach(b=>b.onclick=()=>{let n=notesData.find(x=>String(x.id)===b.dataset.n),s=(n.suggestions||[])[+b.dataset.i];if(!s)return;setKind(s.kind||n.kind);openMediaCard({...s,external_id:s.externalId})});
  document.querySelectorAll(".noteTrack").forEach(b=>b.onclick=async()=>{
@@ -1963,7 +2104,7 @@ function renderWatchers(data){
  });
  document.querySelectorAll(".watchDrop").forEach(b=>b.onclick=async()=>{
   let x=watchData[+b.dataset.i];
-  if(!confirm(`Снять слежение за «${x.title||x.url}»?`))return;
+  if(!await mhConfirm(`Снять слежение за «${x.title||x.url}»?`))return;
   await fetch(`/api/watchers/${x.id}`,{method:"DELETE"});loadWatchers();refreshTrackingBadge();
  });
 }
@@ -2131,11 +2272,11 @@ $("hubTvInstall").onclick=async()=>{
 };
 
 $("hubInstallUpdate").onclick=async()=>{
- if(!hubUpdateData?.available)return;if(!confirm(`Установить MediaHUB ${hubUpdateData.latestVersion}? Будет создана резервная копия. Просмотр ненадолго прервётся.`))return;
+ if(!hubUpdateData?.available)return;if(!await mhConfirm(`Установить MediaHUB ${hubUpdateData.latestVersion}? Будет создана резервная копия. Просмотр ненадолго прервётся.`))return;
  let b=$("hubInstallUpdate");b.disabled=true;
  try{let fd=new FormData();fd.append('commit',hubUpdateData.commit);let r=await fetch('/api/updates/install',{method:'POST',headers:{'X-MediaHub-Setup':'1'},body:fd}),j=await r.json();if(!r.ok)throw Error(j.detail);toast(j.message);$("hubUpdateState").textContent=j.message;hubUpdatePoll=setTimeout(loadHubUpdateStatus,2000)}catch(e){toast(e.message,true)}finally{b.disabled=false}
 };
-$("hubCopyAddress").onclick=async()=>{try{await navigator.clipboard.writeText(location.origin);toast('Адрес скопирован')}catch(e){prompt('Скопируйте адрес хаба:',location.origin)}};
+$("hubCopyAddress").onclick=async()=>{try{await navigator.clipboard.writeText(location.origin);toast('Адрес скопирован')}catch(e){await mhPrompt('Скопируйте адрес хаба:',location.origin)}};
 $("hubConnectServices").onclick=async()=>{let b=$("hubConnectServices");b.disabled=true;try{let r=await fetch('/api/setup/connect',{method:'POST',headers:{'X-MediaHub-Setup':'1'}}),j=await r.json();toast(j.message||j.detail,!r.ok)}finally{b.disabled=false}};
 const setupIcons={storage:"ic-folder",qbittorrent:"ic-download",prowlarr:"ic-search",radarr:"ic-movie",sonarr:"ic-tv",automation:"ic-refresh"};
 const setupIcon=k=>`<svg class="mhIcon" aria-hidden="true"><use href="#${setupIcons[k]||"ic-services"}"/></svg>`;
@@ -2248,7 +2389,7 @@ async function loadIsoStatus(){
    toast(jj.message||"Готово",!jj.ok);loadIsoStatus();
   });
   document.querySelectorAll(".isoDrop").forEach(b=>b.onclick=async()=>{
-   if(!confirm(`Удалить образ ${b.dataset.name}?`))return;
+   if(!await mhConfirm(`Удалить образ ${b.dataset.name}?`))return;
    let r=await fetch("/api/setup/iso/"+encodeURIComponent(b.dataset.name),{method:"DELETE"}),jj=await r.json();
    toast(jj.message||jj.detail||"Готово",!r.ok);loadIsoStatus();
   });
@@ -2264,7 +2405,7 @@ async function loadSetupConfig(){
 }
 
 async function startSetupInstall(component){
- if(component==="recommended"&&!confirm("Установить комплект: хранилище, qBittorrent, Prowlarr, Radarr, Sonarr и автоматизацию MediaHub?"))return;
+ if(component==="recommended"&&!await mhConfirm("Установить комплект: хранилище, qBittorrent, Prowlarr, Radarr, Sonarr и автоматизацию MediaHub?"))return;
  let fd=new FormData();fd.append("component",component);
  let r=await fetch("/api/setup/install",{method:"POST",headers:{"X-MediaHub-Setup":"1"},body:fd}),j=await r.json();
  toast(j.message||j.detail,!r.ok);if(r.ok){$("setupJob").classList.remove("hidden");pollSetupJob()}
@@ -2284,7 +2425,7 @@ async function pollSetupJob(){
 }
 $("installRecommended").onclick=()=>{if(!((setupStatusData?.components||[]).find(x=>x.key==="storage")||{}).installed){toast("Сначала настрой хранилище",true);return}startSetupInstall("recommended")};
 $("refreshSetup").onclick=loadSetup;$("scanStorageDisks").onclick=loadStorageWizard;$("modePool").onclick=()=>setStorageMode("pool");$("modeExisting").onclick=()=>setStorageMode("existing");$("poolEraseCheck").onchange=refreshPoolButton;
-$("applyPoolStorage").onclick=async()=>{let selected=selectedStorageDisks();if(!selected.length)return;if(!$("poolEraseCheck").checked)return;let msg=`${storageInfo?.configured?"Добавить в MediaPool":"Создать MediaPool из"} ${selected.join(", ")}?\n\nВСЕ ДАННЫЕ НА ВЫБРАННЫХ ДИСКАХ БУДУТ УДАЛЕНЫ.`;if(!confirm(msg))return;let fd=new FormData();fd.append("disks",JSON.stringify(selected));fd.append("mountpoint",$("poolMountInput").value.trim());fd.append("pool_name",$("poolNameInput").value.trim());fd.append("reserve_gb",$("poolReserveInput").value||"20");fd.append("confirm","ERASE");let r=await fetch("/api/setup/storage/pool",{method:"POST",headers:{"X-MediaHub-Setup":"1"},body:fd}),j=await r.json();toast(j.message||j.detail,!r.ok);if(r.ok){$("setupJob").classList.remove("hidden");pollSetupJob()}};
+$("applyPoolStorage").onclick=async()=>{let selected=selectedStorageDisks();if(!selected.length)return;if(!$("poolEraseCheck").checked)return;let msg=`${storageInfo?.configured?"Добавить в MediaPool":"Создать MediaPool из"} ${selected.join(", ")}?\n\nВСЕ ДАННЫЕ НА ВЫБРАННЫХ ДИСКАХ БУДУТ УДАЛЕНЫ.`;if(!await mhConfirm(msg))return;let fd=new FormData();fd.append("disks",JSON.stringify(selected));fd.append("mountpoint",$("poolMountInput").value.trim());fd.append("pool_name",$("poolNameInput").value.trim());fd.append("reserve_gb",$("poolReserveInput").value||"20");fd.append("confirm","ERASE");let r=await fetch("/api/setup/storage/pool",{method:"POST",headers:{"X-MediaHub-Setup":"1"},body:fd}),j=await r.json();toast(j.message||j.detail,!r.ok);if(r.ok){$("setupJob").classList.remove("hidden");pollSetupJob()}};
 $("saveMediaRoot").onclick=async()=>{let fd=new FormData();fd.append("root",$("mediaRootInput").value.trim());let r=await fetch("/api/setup/storage",{method:"POST",headers:{"X-MediaHub-Setup":"1"},body:fd}),j=await r.json();toast(j.message||j.detail,!r.ok);if(r.ok){if(j.restartRequired)$("storageRestart").classList.remove("hidden");pollSetupJob()}};
 $("testTmdb").onclick=async()=>{let b=$("testTmdb"),fd=new FormData();fd.append("credential",$("cfgTmdbKey").value.trim());b.disabled=true;b.textContent="Проверяю и сохраняю…";try{let r=await fetch("/api/setup/test-tmdb",{method:"POST",headers:{"X-MediaHub-Setup":"1"},body:fd}),j=await r.json();toast(j.message||j.detail,!r.ok);if(r.ok){$("cfgTmdbKey").value="";await loadSetupConfig();await loadDiscoverySources();await loadHome()}}finally{b.disabled=false;b.textContent="Проверить TMDB"}};
 $("saveSetupConfig").onclick=async()=>{let b=$("saveSetupConfig"),fd=new FormData();fd.append("qbit_user",$("cfgQbitUser").value.trim());fd.append("qbit_pass",$("cfgQbitPass").value);fd.append("tmdb_api_key",$("cfgTmdbKey").value.trim());fd.append("kinopoisk_api_key",$("cfgKinopoiskKey").value.trim());fd.append("outbound_proxy",$("cfgOutboundProxy").value.trim());b.disabled=true;try{let r=await fetch("/api/setup/config",{method:"POST",headers:{"X-MediaHub-Setup":"1"},body:fd}),j=await r.json();toast(j.message||j.detail,!r.ok);if(r.ok){$("cfgTmdbKey").value="";$("cfgQbitPass").value="";$("cfgKinopoiskKey").value="";$("cfgOutboundProxy").value="";await loadSetupConfig();await loadDiscoverySources();await loadHome()}}finally{b.disabled=false}};

@@ -927,3 +927,94 @@ input[type=checkbox]:focus-visible,input[type=radio]:focus-visible{outline:2px s
 .hubServerDetails{margin:18px 0;border:1px solid #ffffff16;border-radius:16px;padding:18px}.hubServerDetails>summary{cursor:pointer;font-weight:600}.hubSettingsIntro{padding:4px 0 12px}.hubServerDetails[open]>summary{margin-bottom:20px}
 /* Установка на ТВ из настроек: поле адреса, ход установки и подсказки. */
 .hubTvInstall{margin:18px 0 0;padding:18px;border-radius:16px;background:#0002}.hubTvInstall h3{margin:0 0 6px;font-size:17px}.hubTvInstall>p,.hubTvInstall details p{color:var(--muted,#94a3b8);line-height:1.6;margin:0 0 12px}.hubTvRow{display:flex;flex-wrap:wrap;gap:10px}.hubTvRow input{flex:1 1 200px;min-width:0}.hubTvRow button{flex:0 0 auto}.hubTvInstall details{margin:12px 0 0}.hubTvState:empty{display:none}.hubTvState{margin-top:12px;padding:12px 14px;border-radius:12px;border:1px solid #ffffff18;line-height:1.55;overflow-wrap:anywhere}.hubTvState ul{margin:8px 0 0;padding-left:18px;color:#a9b7ce;font-size:13px}.hubTvState.waiting{border-color:#f5c45e88;background:#f5c45e14}.hubTvState.done{border-color:#5fd39288;background:#5fd39214}.hubTvState.error{border-color:#ff7a7a88;background:#ff7a7a14}
+/* Коллекция фильмов в одной папке: предложение разложить по карточкам. */
+.collectionSplit{margin-top:14px;padding:14px 16px;border-radius:var(--g-r-md);background:var(--g-surface3);display:grid;gap:6px;justify-items:start}
+.collectionSplit small{font-size:12px;color:var(--g-text2);line-height:1.5}
+.collectionHint{color:var(--g-primary,#a8c7fa)!important}
+/* Единый стиль окон: карточка проекта, «Смотреть», релизы, импорт и подтверждения
+   используют одну поверхность, один крестик и одинаковые кнопки действий. */
+.modal,.watchProjectModal{background:rgba(0,0,0,.62);backdrop-filter:blur(8px)}
+.modalbox,.detailbox,.watchProjectBox{background:var(--g-surface2);color:var(--g-text);border:1px solid rgba(255,255,255,.06);border-radius:28px;box-shadow:0 24px 80px rgba(0,0,0,.5)}
+.closeBtn,.watchClose{position:absolute;right:14px;top:14px;z-index:3;display:grid;place-items:center;width:44px;height:44px;min-height:44px;padding:0;border:0;border-radius:50%;background:rgba(255,255,255,.08);color:var(--g-text);font-size:0}
+.closeBtn:hover,.watchClose:hover{background:rgba(255,255,255,.16)}
+.closeBtn .mhIcon{width:20px;height:20px}
+/* Кнопки действий: одна главная (заливка), остальные тональные, опасные — красные. */
+:is(.detailText,.modalbox,.dialogActions,.watchHeroActions,.collectionSplit)>:is(.primary,.softBtn,.dangerBtn){display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:0 24px;border-radius:var(--g-r-full);font-weight:600;font-size:14px}
+:is(.modal,.watchProjectModal) .softBtn{background:var(--g-surface4);color:var(--g-text);border:0}
+:is(.modal,.watchProjectModal) .softBtn:hover{background:#333537}
+.modal .dangerBtn{border-radius:var(--g-r-full)}
+.dangerBtn.solid{background:var(--g-red);color:#601410}
+.dangerBtn.solid:hover{background:#f6aea9}
+.detailText>:is(.primary,.softBtn){margin:6px 8px 6px 0}
+.detailTitleRow{align-items:flex-start}
+.detailTitleRow .heartLarge{flex:none;align-self:flex-start;width:44px;height:44px;min-height:44px;padding:0;border-radius:50%}
+/* Окно «Смотреть» в тех же цветах, что и карточка. */
+.watchProjectModal{color:var(--g-text)}
+.watchBackdrop:after{background:linear-gradient(90deg,rgba(30,31,32,.55),rgba(30,31,32,.88)),linear-gradient(0deg,var(--g-surface2),transparent 60%)}
+.watchEyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--g-muted)}
+.watchFacts,.watchHeroText p{color:var(--g-text2)}
+.watchSummary,.watchLast{color:var(--g-muted)}
+.watchSeason{min-height:36px;border:1px solid var(--g-outline);background:transparent;color:var(--g-text2);border-radius:var(--g-r-full);padding:6px 16px;font-weight:500}
+.watchSeason:hover{background:rgba(255,255,255,.06)}
+.watchSeason.active{background:var(--g-blue-tint);border-color:transparent;color:var(--g-blue);font-weight:600}
+.episodeCard{background:var(--g-surface3);color:var(--g-text);border:0;border-radius:var(--g-r-lg);transition:background var(--g-fast),box-shadow var(--g-med),transform var(--g-med)}
+.episodeCard:hover,.episodeCard:focus-visible{background:var(--g-surface4);box-shadow:var(--g-e2);border-color:transparent}
+.episodeArt{background:linear-gradient(135deg,#2d2f31,#1b1c1d)}
+.episodeArt:after{background:linear-gradient(0deg,rgba(19,19,20,.75),transparent)}
+.episodePlay{background:var(--g-blue);color:var(--g-blue-ink)}
+.episodeState{background:rgba(0,0,0,.6);color:var(--g-text)}
+.episodeProgress i{background:var(--g-blue)}
+.episodeBody span{color:var(--g-muted)}.episodeBody small{color:var(--g-text2)}
+/* Окно подтверждения или ввода поверх любых окон, включая плеер. */
+.mhDialog{z-index:140}
+.mhDialog .modalbox{width:min(440px,100%);padding:26px 24px 20px}
+.mhDialogText{margin:0 0 18px;white-space:pre-line;line-height:1.55;font-size:15px;color:var(--g-text);overflow-wrap:anywhere}
+.mhDialogInput{width:100%;margin:0 0 18px}
+.dialogActions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:10px}
+@media(max-width:650px){.dialogActions>button{flex:1 1 0}.watchClose{right:12px;top:12px}}
+/* Коллекции библиотеки (22.9): карточка-стопка, окно коллекции, режим выбора. */
+.collPoster{background:linear-gradient(160deg,#2a2d38,#17181d)!important}
+.collStack{position:absolute;inset:0;display:block}
+.collLayer{position:absolute;width:76%;height:76%;border-radius:12px;overflow:hidden;box-shadow:0 10px 26px #000a;background:var(--g-surface3);transition:transform .25s}
+.collLayer img,.collLayer .noposter{width:100%;height:100%;object-fit:cover}
+.collLayer3{right:5%;top:5%;transform:rotate(6deg);filter:brightness(.55)}
+.collLayer2{right:12%;top:10%;transform:rotate(2.5deg);filter:brightness(.75)}
+.collLayer1{left:6%;bottom:6%;transform:rotate(-3deg)}
+.collCard:hover .collLayer3{transform:rotate(9deg) translate(4px,-4px)}
+.collCard:hover .collLayer1{transform:rotate(-5deg) translate(-3px,3px)}
+.collBadge{position:absolute;left:8px;top:8px;z-index:3;padding:5px 9px;border-radius:8px;font-size:11px;font-weight:700;background:var(--g-blue);color:#062e6f}
+.collProgress{display:block;height:4px;border-radius:4px;background:#ffffff1a;overflow:hidden;margin:8px 0 10px}
+.collProgress i{display:block;height:100%;background:var(--g-blue);border-radius:4px}
+.collHeroStack{position:relative;inset:auto;aspect-ratio:2/3;width:100%}
+.collHeroStack .collLayer{width:80%;height:80%}
+.collHeroProgress{max-width:340px;margin-top:16px}
+.watchMovieProgress{max-width:340px;margin-top:10px}
+.collLink{display:inline-flex;margin:4px 0 10px;padding:6px 12px;min-height:auto;border:0;border-radius:16px;background:#a8c7fa22;color:var(--g-blue);font-size:13px;font-weight:600;cursor:pointer}
+.collLink:hover{background:#a8c7fa38}
+.collFilms{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:18px}
+.collFilm{display:grid;gap:8px;align-content:start}
+.collFilmOpen{display:grid;gap:5px;padding:0;min-height:auto;border:0;background:none;color:inherit;text-align:left;cursor:pointer}
+.collFilmOpen b{font-size:14px;line-height:1.3}
+.collFilmOpen small{color:var(--g-text2);font-size:12px}
+.collFilmArt{position:relative;display:block;aspect-ratio:2/3;border-radius:12px;overflow:hidden;background:var(--g-surface3);transition:transform .2s}
+.collFilmArt img,.collFilmArt .noposter{width:100%;height:100%;object-fit:cover}
+.collFilmOpen:hover .collFilmArt{transform:translateY(-3px)}
+.collFilm.watched .collFilmArt img{filter:brightness(.6)}
+.collFilmNo{position:absolute;left:8px;bottom:10px;z-index:1;font-size:30px;font-weight:800;color:#fff;text-shadow:0 2px 10px #000c}
+.collFilmTools{display:flex;gap:6px}
+.collFilmTools button{flex:1;min-height:34px;padding:4px}
+.collEditRow{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin:0 0 18px}
+.collEditRow .mergeLabel{flex:1 1 240px}
+.collBar{position:sticky;bottom:12px;z-index:20;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;padding:14px 18px;border-radius:18px;background:var(--g-surface4);box-shadow:0 12px 34px #000a}
+.collBarText{display:grid;gap:2px}.collBarText small{color:var(--g-text2);font-size:12px}
+.collBarActions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.collPickable{cursor:pointer;outline:2px solid transparent;outline-offset:-2px}
+.collPicked{outline-color:var(--g-blue)}
+.collPickMark{position:absolute;right:8px;top:8px;z-index:3;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;border:2px solid #fff;background:#0008;color:#062e6f;font-weight:800}
+.collPicked .collPickMark{background:var(--g-blue);border-color:var(--g-blue)}
+.collMemberTag{position:absolute;left:8px;bottom:8px;right:8px;z-index:3;padding:4px 8px;border-radius:8px;background:#000b;color:var(--g-text2);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.collDisabled{opacity:.4;pointer-events:none}
+@media(max-width:650px){.collFilms{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.collBar{bottom:72px}.collBadge{font-size:10px}}
+/* На узком экране карточка библиотеки — колонка, а не строка: постер держит свою пропорцию
+   (общее правило .posterButton для строк каталога сжимало его до полоски). */
+@media(max-width:760px){.libraryShelf .libraryCard .posterButton{aspect-ratio:2/3;height:auto!important;min-height:0}}

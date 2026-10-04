@@ -1298,6 +1298,13 @@ def cache_db():
     con.execute("""create table if not exists bindings(
         kind text not null,indexer_id integer not null,enabled integer not null default 1,
         primary key(kind,indexer_id))""")
+    # Коллекции библиотеки (серия фильмов одной карточкой); та же схема в download_organizer.py.
+    con.execute("""create table if not exists library_collections(
+        id integer primary key autoincrement,kind text not null,title text not null,
+        created_at text,updated_at text)""")
+    con.execute("""create table if not exists library_collection_items(
+        collection_id integer not null,path text not null,position integer not null default 0,
+        primary key(collection_id,path))""")
     con.execute("""create table if not exists catalog(
         kind text,mode text,rank integer,title text,year text,overview text,
         poster text,external_id integer,primary key(kind,mode,rank))""")
@@ -1961,7 +1968,9 @@ def move_merge(src:Path,dst:Path):
 def cleanup_empty_inbox_parents(path:Path):
     p=path.resolve()
     stop=INBOX_ROOT.resolve()
-    while p!=stop and _is_under(p,stop):
+    # Папки категорий (inbox/movies, inbox/tv…) остаются: в них смотрят qBittorrent и проводник,
+    # а после их удаления проводник показывал «Папка не найдена» поверх сообщения об успехе.
+    while p!=stop and p.parent!=stop and _is_under(p,stop):
         try:
             p.rmdir()
         except OSError:
@@ -2073,13 +2082,51 @@ def reset_fs_scan_cache():
         except Exception:pass
 
 
+_ORGANIZER_MODULE=None
+
+def download_organizer_module():
+    """Функции download_organizer.py (раскладка коллекций) без запуска самого организатора."""
+    global _ORGANIZER_MODULE
+    if _ORGANIZER_MODULE is None:
+        try:
+            import importlib.util
+            spec=importlib.util.spec_from_file_location("mediahub_download_organizer",BASE_DIR/"download_organizer.py")
+            module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            _ORGANIZER_MODULE=module
+        except Exception as e:
+            print("download_organizer import failed:",e)
+            _ORGANIZER_MODULE=False
+    return _ORGANIZER_MODULE or None
+
+def save_split_collection(organizer,parts,source_name,folders):
+    """Фильмы разложенной раздачи сразу собрать в коллекцию библиотеки."""
+    try:
+        with cache_db() as con:
+            organizer.save_collection(con,"movies",organizer.collection_name([p["title"] for p in parts],source_name),folders)
+            con.commit()
+    except Exception as e:
+        print("collection save failed:",e)
+
 def import_folder_to_library(src:Path,kind:str,title:str,season:int):
     # Папка, лежащая прямо в корне раздела, формально «уже в библиотеке», но
     # её всё равно нужно упорядочить — перенести в папку тайтла.
     if already_in_library(src) and not is_media_root(src.parent):
         return src,0,{"move":0,"deduped":0,"already":1}
-    dest=library_destination(src,kind,title,season)
     parent=src.parent
+    # Коллекция фильмов — каждому фильму своя папка; та же раскладка, что у организатора загрузок.
+    parts=[]
+    if kind=="movies":
+        organizer=download_organizer_module()
+        if organizer:
+            try:parts=organizer.collection_parts(src)
+            except Exception:parts=[]
+    if parts:
+        folders=organizer.organize_collection(src,parts,src.name)
+        save_split_collection(organizer,parts,src.name,folders)
+        if in_inbox(parent):
+            cleanup_empty_inbox_parents(parent)
+        return folders[0],len(parts),{"move":len(parts),"deduped":0,"already":0,"collection":[str(f) for f in folders]}
+    dest=library_destination(src,kind,title,season)
     result=move_merge(src,dest)
     if in_inbox(parent):
         cleanup_empty_inbox_parents(parent)
@@ -4192,6 +4239,7 @@ async def library_rename(new_title:str=Form(...),kind:str=Form("movies"),
         if old_path and old_path!=new_path:
             con.execute("delete from manual_meta where path=?",(old_path,))
             con.execute("update download_jobs set final_path=? where final_path=?",(new_path,old_path))
+            move_collection_item(con,old_path,new_path)
         con.commit()
     # Скан медиатеки закэширован — сбрасываем, чтобы список обновился сразу.
     set_setting(f"fs_scan_{kind}","")
@@ -4262,6 +4310,8 @@ async def library_delete(kind:str=Form("movies"),item_key:str=Form(""),path:str=
             # Пользовательская метка живёт отдельно от ARR, иначе тайтл вернётся в список.
             con.execute("delete from user_tracking where kind=? and (item_key=? or track_key=?)",
                         (kind,key,f"{kind}|{normalize_search_text(name)}"))
+        if wiped and target_path:
+            move_collection_item(con,target_path,None)
         con.commit()
     if wiped:
         forget_media_path(target_path)
@@ -4439,6 +4489,8 @@ async def library_merge(kind:str=Form("anime"),
             con.execute("delete from library_cache where kind=? and item_key=?",(kind,str(src_row["item_key"])))
         con.execute("delete from manual_meta where path=?",(src_path,))
         con.execute("update download_jobs set final_path=? where final_path=?",(str(dest),src_path))
+        # Присоединённого проекта больше нет — в коллекции остаётся основной.
+        move_collection_item(con,src_path,None)
         con.commit()
     forget_media_path(src_path)
     reset_fs_scan_cache()
@@ -7658,6 +7710,8 @@ async def file_browser(path:str=Query("/mnt/media")):
                 "suggestedKind":suggest_kind(x),
                 "suggestedTitle":suggested_title(x),
                 "season":season_number(x.name),
+                # Пак из нескольких фильмов: при переносе в «Фильмы» он разложится по карточкам.
+                "collection":len(collection_preview_parts(x)) if videos>=2 and suggest_kind(x)=="movies" else 0,
                 "inLibrary":already_in_library(x),
                 "inInbox":in_inbox(x),
                 "canDelete":can_delete_path(x,protected),
@@ -7702,13 +7756,154 @@ async def import_folder(path:str=Form(...),kind:str=Form(...),title:str=Form(...
     except RuntimeError as e:
         raise HTTPException(409,str(e))
     await jellyfin_refresh()
-    try:upsert_live_library_item(kind,dest,title)
-    except Exception:pass
+    # У каждого фильма коллекции своё название — из имени его папки, а не введённое для всей раздачи.
+    for folder,name in ([(Path(f),None) for f in modes["collection"]] if modes.get("collection") else [(dest,title)]):
+        try:upsert_live_library_item(kind,folder,name)
+        except Exception:pass
     subprocess.Popen(["systemctl","start","mediahub-local-cache.service"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     if modes.get("already"):
         return {"ok":True,"message":"Папка уже находится в медиатеке","dest":str(dest),"modes":modes}
+    if modes.get("collection"):
+        names=[Path(f).name for f in modes["collection"]]
+        words=download_organizer_module().films_word(len(names))
+        log_activity("import",title,f"Коллекция: {words} — "+", ".join(names),True)
+        return {"ok":True,"message":f"Коллекция разложена: {words}, у каждого своя карточка.","dest":str(dest),"modes":modes}
     log_activity("import",title,str(dest),True)
     return {"ok":True,"message":f"Перемещено в медиатеку: {imported} файлов. Исходная папка удалена.","dest":str(dest),"modes":modes}
+
+def collection_folder(path:str):
+    """Папка фильма из медиатеки или загрузок, которую можно разложить как коллекцию."""
+    src=Path(path)
+    if not src.is_dir():raise HTTPException(404,"Папка не найдена")
+    if not safe_media_path(src) or is_media_root(src):raise HTTPException(400,"Разрешены только папки внутри медиатеки")
+    return src
+
+def collection_preview_parts(src:Path):
+    """Фильмы коллекции в папке, как их увидит раскладка, или []."""
+    organizer=download_organizer_module()
+    if not organizer:return []
+    try:return organizer.collection_parts(src)
+    except Exception:return []
+
+@app.get("/api/library/collection-preview")
+def library_collection_preview(path:str=Query(...)):
+    """Какие фильмы получатся, если разложить папку как коллекцию."""
+    parts=collection_preview_parts(collection_folder(path))
+    return {"parts":[{"title":p["title"],"year":p["year"],"file":p["file"].name} for p in parts]}
+
+@app.post("/api/library/split-collection")
+async def library_split_collection(path:str=Form(...)):
+    """Разложить уже скачанную коллекцию: каждому фильму своя папка и карточка."""
+    src=collection_folder(path)
+    parts=await asyncio.to_thread(collection_preview_parts,src)
+    if not parts:raise HTTPException(400,"В папке не найдено нескольких разных фильмов — это не коллекция")
+    try:folders=await asyncio.to_thread(download_organizer_module().organize_collection,src,parts,src.name)
+    except RuntimeError as e:raise HTTPException(409,str(e))
+    save_split_collection(download_organizer_module(),parts,src.name,folders)
+    if in_inbox(src.parent):cleanup_empty_inbox_parents(src.parent)
+    for f in folders:
+        try:upsert_live_library_item("movies",f,None)
+        except Exception:pass
+    # Старая карточка всей коллекции указывает на папку, которой больше нет.
+    with cache_db() as con:
+        con.execute("delete from library_cache where kind='movies' and rtrim(path,'/')=? and catalog_source='filesystem'",(str(src).rstrip('/'),))
+        con.commit()
+    subprocess.Popen(["systemctl","start","mediahub-local-cache.service"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    names=[f.name for f in folders]
+    words=download_organizer_module().films_word(len(names))
+    log_activity("collection",src.name,f"Разложено: {words} — "+", ".join(names),True)
+    return {"ok":True,"message":f"Коллекция разложена: {words}, у каждого своя карточка","folders":[str(f) for f in folders]}
+
+def collection_key(path):
+    """Путь проекта в коллекции — тот же вид, что у обхода медиатеки (resolve, без «/» в конце)."""
+    try:return str(Path(path).resolve()).rstrip("/")
+    except Exception:return str(path or "").rstrip("/")
+
+def move_collection_item(con,old,new):
+    """Проект переименовали (new — новый путь) или удалили (new=None): поправить коллекции."""
+    old_raw=str(old or "").rstrip("/");old_key=collection_key(old)
+    if new:
+        con.execute("update or ignore library_collection_items set path=? where path in (?,?)",(collection_key(new),old_raw,old_key))
+    con.execute("delete from library_collection_items where path in (?,?)",(old_raw,old_key))
+    con.execute("delete from library_collections where id not in (select distinct collection_id from library_collection_items)")
+
+def _collection_organizer():
+    organizer=download_organizer_module()
+    if not organizer:raise HTTPException(500,"Модуль коллекций не загрузился, подробности в журнале службы")
+    return organizer
+
+def _collection_paths(raw:str):
+    """Список папок проектов из JSON формы: только существующие папки медиатеки."""
+    try:paths=json.loads(raw or "[]")
+    except Exception:raise HTTPException(400,"Неверный список проектов")
+    if not isinstance(paths,list):raise HTTPException(400,"Неверный список проектов")
+    out=[]
+    for p in paths[:200]:
+        f=Path(str(p or ""))
+        if not str(p or "").strip() or not f.exists() or not safe_media_path(f) or is_media_root(f):
+            raise HTTPException(400,f"Проект не найден в медиатеке: {p}")
+        out.append(collection_key(f))
+    return list(dict.fromkeys(out))
+
+@app.get("/api/collections")
+def library_collections(kind:str=Query("movies")):
+    """Коллекции раздела: состав по порядку и прогресс просмотра каждого проекта."""
+    with cache_db() as con:
+        cols=con.execute("select * from library_collections where kind=? order by updated_at desc",(kind,)).fetchall()
+        out=[]
+        for c in cols:
+            items=[]
+            for r in con.execute("select path from library_collection_items where collection_id=? order by position",(c["id"],)).fetchall():
+                hist=con.execute("select position,duration,completed from playback_history where project=? order by updated_at desc",(r["path"],)).fetchall()
+                last=hist[0] if hist else None
+                items.append({"path":r["path"],"completed":bool(last and last["completed"]),
+                              "position":last["position"] if last else 0,"duration":last["duration"] if last else 0,
+                              "progress":round(min(100,100*last["position"]/max(1,last["duration"]))) if last else 0,
+                              "exists":Path(r["path"]).exists()})
+            out.append({"id":c["id"],"kind":c["kind"],"title":c["title"],"items":items,"count":len(items),
+                        "watched":sum(1 for x in items if x["completed"]),"updatedAt":c["updated_at"]})
+    return {"items":out}
+
+@app.post("/api/collections")
+def library_collection_create(kind:str=Form("movies"),title:str=Form(...),paths:str=Form(...)):
+    """Собрать коллекцию из выбранных проектов (порядок — как передан)."""
+    if kind not in {"movies","tv","anime"}:raise HTTPException(400,"Неизвестный раздел")
+    title=" ".join(str(title or "").split())[:120]
+    keys=_collection_paths(paths)
+    if not title:raise HTTPException(400,"Укажи название коллекции")
+    if len(keys)<2:raise HTTPException(400,"В коллекции должно быть хотя бы два проекта")
+    with cache_db() as con:
+        cid=_collection_organizer().save_collection(con,kind,title,keys);con.commit()
+    log_activity("collection",title,f"Собрана коллекция: {len(keys)} проектов",True)
+    return {"ok":True,"id":cid,"message":f"Коллекция «{title}» собрана"}
+
+@app.post("/api/collections/{cid}")
+def library_collection_update(cid:int,title:str=Form(""),paths:str=Form("")):
+    """Переименовать коллекцию и/или задать новый состав и порядок."""
+    with cache_db() as con:
+        row=con.execute("select * from library_collections where id=?",(cid,)).fetchone()
+        if not row:raise HTTPException(404,"Коллекция не найдена")
+        title=" ".join(str(title or "").split())[:120]
+        if title:
+            con.execute("update library_collections set title=? where id=?",(title,cid))
+        if paths:
+            keys=_collection_paths(paths)
+            if len(keys)<2:raise HTTPException(400,"В коллекции должно быть хотя бы два проекта — или разбери её")
+            _collection_organizer().set_collection_items(con,cid,keys)
+        con.execute("update library_collections set updated_at=? where id=?",(datetime.now(timezone.utc).isoformat(),cid))
+        con.commit()
+    return {"ok":True,"message":"Коллекция сохранена"}
+
+@app.post("/api/collections/{cid}/delete")
+def library_collection_delete(cid:int):
+    """Разобрать коллекцию: проекты и файлы остаются в библиотеке как были."""
+    with cache_db() as con:
+        row=con.execute("select title from library_collections where id=?",(cid,)).fetchone()
+        if not row:raise HTTPException(404,"Коллекция не найдена")
+        con.execute("delete from library_collection_items where collection_id=?",(cid,))
+        con.execute("delete from library_collections where id=?",(cid,))
+        con.commit()
+    return {"ok":True,"message":f"Коллекция «{row['title']}» разобрана, фильмы остались в библиотеке"}
 
 @app.post("/api/import-file")
 async def import_file(path:str=Form(...),kind:str=Form(...),title:str=Form(...),season:int=Form(1)):

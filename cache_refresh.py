@@ -582,6 +582,79 @@ def refresh_tmdb_library_localization(con):
             updated+=1
     state(con,"TMDB library RU",True,updated,started=started);con.commit()
 
+def repair_jellyfin_posters(con):
+    """Заменить постеры-ссылки на удалённый Jellyfin постерами TMDB.
+
+    Jellyfin записывал в библиотеку адреса /api/jellyfin-image/<id>. После его
+    удаления они отдают 404, а локальные папки и тайтлы с русским названием
+    повторно не обогащаются — карточки оставались без обложек навсегда.
+    ID TMDB берём из providerIds, сохранённых Jellyfin; без него ищем по
+    названию, затем пробуем постер страницы-источника. Не нашли — пусто,
+    интерфейс нарисует заглушку вместо битой картинки.
+    """
+    if JELLYFIN_KEY:
+        return
+    rows=con.execute("select * from library_cache where poster like '/api/jellyfin-image/%'").fetchall()
+    # manual_meta создаёт app.py; на чистой базе таблицы ещё может не быть.
+    try:stale=con.execute("select count(*) from manual_meta where poster like '/api/jellyfin-image/%'").fetchone()[0]
+    except sqlite3.OperationalError:stale=None
+    if not rows and not stale:
+        return
+    started=time.monotonic();fixed=0;failures=0
+    meta_index=download_meta_index(con)
+    with external_client(20) as client:
+        for row in rows:
+            try:extra=json.loads(row["extra_json"] or "{}")
+            except Exception:extra={}
+            ids=extra.get("providerIds") if isinstance(extra.get("providerIds"),dict) else {}
+            tmdb_id=str(extra.get("tmdbId") or ids.get("Tmdb") or "").strip()
+            if not tmdb_id and row["kind"]=="movies" and row["catalog_source"]=="radarr":
+                tmdb_id=str(row["external_id"] or "").strip()
+            title=row["title"] or "";d=None;offline=False
+            # Карточку уже открывали — постер TMDB лежит в кэше деталей портала, сеть не нужна.
+            if tmdb_id.isdigit():
+                try:hit=con.execute("select payload from tmdb_detail_cache where cache_key=?",(f"{row['kind']}|tmdb|{tmdb_id}",)).fetchone()
+                except sqlite3.OperationalError:hit=None
+                try:cached=str((json.loads(hit[0]) if hit else {}).get("poster") or "")
+                except Exception:cached=""
+                if cached.startswith("http"):
+                    con.execute("update library_cache set poster=? where kind=? and item_key=?",(cached,row["kind"],row["item_key"]))
+                    fixed+=1;continue
+            # TMDB не ответил три раза подряд — остальные строки ждут следующей синхронизации.
+            if failures>=3:continue
+            if TMDB_KEY and tmdb_id.isdigit():
+                media=["movie","tv"] if row["kind"]=="movies" else ["tv","movie"]
+                for i,m in enumerate(media):
+                    try:x=_tmdb_detail(client,m,tmdb_id)
+                    except httpx.HTTPStatusError as e:
+                        offline=offline or e.response.status_code!=404;continue
+                    except Exception:
+                        offline=True;continue
+                    # Другой тип с тем же номером — чужой тайтл, берём только при совпадении названия.
+                    names=[x.get("title"),x.get("name"),x.get("original_title"),x.get("original_name")]
+                    if i==0 or max([SequenceMatcher(None,_norm_title(title),_norm_title(v)).ratio() for v in names if v] or [0])>=0.8:
+                        d=x;break
+            # TMDB недоступен — оставляем строку как есть, повторим при следующей синхронизации.
+            if not d and offline:
+                failures+=1;continue
+            failures=0
+            if not d and TMDB_KEY:
+                d=_tmdb_find_ru(client,row["kind"],extra.get("originalTitle") or title,str(row["year"] or ""))
+            url=("https://image.tmdb.org/t/p/w500"+d["poster_path"]) if d and d.get("poster_path") else None
+            if not url:
+                page=download_meta_for(meta_index,row["path"],title)
+                url=(page or {}).get("poster") or None
+            con.execute("update library_cache set poster=? where kind=? and item_key=?",(url,row["kind"],row["item_key"]))
+            if url:fixed+=1
+    # Переименование копировало текущий постер в ручную карточку — меняем и там,
+    # иначе apply_manual_library вернул бы битую ссылку.
+    if stale is not None:
+        con.execute("""update manual_meta set poster=coalesce((select lc.poster from library_cache lc
+                         where rtrim(lc.path,'/')=manual_meta.path and lc.poster is not null
+                         and lc.poster not like '/api/jellyfin-image/%' limit 1),'')
+                       where poster like '/api/jellyfin-image/%'""")
+    state(con,"Library posters",True,fixed,started=started);con.commit()
+
 def _store_external(con,source,key,title,year,overview,poster,url,extra):
     con.execute("""insert or replace into external_discovery
       (source,item_key,title,year,overview,poster,url,added_at,extra_json)
@@ -748,6 +821,8 @@ def refresh_local(con):
     merge_filesystem_library(con)
     refresh_jellyfin_library(con)
     refresh_tmdb_library_localization(con)
+    try:repair_jellyfin_posters(con)
+    except Exception as e:state(con,"Library posters",False,error=str(e))
     try:apply_manual_library(con)
     except Exception as e:state(con,"Manual metadata",False,error=str(e))
     con.execute("insert or replace into meta(key,value) values('last_local_refresh',?)",(now(),))

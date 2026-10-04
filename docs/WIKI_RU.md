@@ -24,7 +24,7 @@ MediaHub — веб-панель домашнего медиасервера с 
 | `app.py` | FastAPI-приложение: все HTTP-эндпоинты, работа с ARR, поиск релизов, библиотека, заметки, хранилище |
 | `cache_refresh.py` | фоновое обновление кэша: TMDB, TVmaze, AniLiberty, КиноПоиск, синхронизация библиотеки из Radarr/Sonarr |
 | `system_setup.py` | установка компонентов, Storage Wizard, разметка дисков, состояние сервисов |
-| `download_organizer.py` | перенос завершённых загрузок из inbox в медиатеку: фильм — в `movies/<Название (Год)>/`, сериал и аниме — в `<Название>/Season NN/` |
+| `download_organizer.py` | перенос завершённых загрузок из inbox в медиатеку: фильм — в `movies/<Название (Год)>/`, коллекция фильмов — каждый фильм в свою папку (`collection_parts()`, `organize_collection()`), сериал и аниме — в `<Название>/Season NN/` |
 | `templates/index.html` | вся разметка и весь фронтенд-JavaScript |
 | `static/app.css` | стили, включая слой Google Material (v21.0) и слой v21.1 |
 | `install.sh` | установка/обновление на сервере, systemd-юниты, проверка версии |
@@ -69,7 +69,7 @@ MediaHub — веб-панель домашнего медиасервера с 
 | История | журнал действий | `/api/activity` |
 | Качество | сезоны и апгрейды качества | `/api/quality/series` |
 | Файлы | проводник по медиатеке с форматом каждого файла, ручной импорт, удаление любого файла и папки (кроме корней разделов), в том числе открытой сейчас | `/api/file-browser`, `/api/import-folder`, `/api/import-file`, `/api/delete-folder` |
-| Библиотека | сетка скачанного; у карточки — переименование, данные по ссылке, объединение двух проектов, список файлов (переименование, перенос в сезон, удаление) и удаление тайтла вместе с файлами | `/api/library-cached`, `/api/library/rename`, `/api/library/attach-page`, `/api/library/manual-meta`, `/api/library/merge`, `/api/library/files`, `/api/library/file-rename`, `/api/library/file-move`, `/api/library/delete` |
+| Библиотека | сетка скачанного; у карточки — переименование, данные по ссылке, объединение двух проектов, список файлов (переименование, перенос в сезон, удаление) и удаление тайтла вместе с файлами | `/api/library-cached`, `/api/library/rename`, `/api/library/attach-page`, `/api/library/manual-meta`, `/api/library/merge`, `/api/collections`, `/api/library/collection-preview`, `/api/library/split-collection`, `/api/library/files`, `/api/library/file-rename`, `/api/library/file-move`, `/api/library/delete` |
 | Сервисы | здоровье системы, источники, качество, расширенные настройки, хранилище и диски | `/api/status`, `/api/system-health`, `/api/preferences`, `/api/storage/usage` |
 | Настройки | APK, инструкции, обновления, обслуживание, Storage Wizard, подключения | `/api/setup/*`, `/api/apps`, `/api/updates` |
 | Источники | привязки индексеров и источники новинок | `/api/provider-bindings`, `/api/discovery-sources` |
@@ -100,6 +100,12 @@ MediaHub — веб-панель домашнего медиасервера с 
 Если к проекту привязана страница (`manual_meta.source_url`), она — единственный источник карточки: `apply_manual_meta()` берёт название, год, постер, описание, жанры и рейтинг только с неё, а поля TMDB/Jellyfin/ARR (`FOREIGN_META_FIELDS`) обнуляет. `/api/media-details?path=` для такого проекта отдаёт `library_page_card()` и не ходит во внешние каталоги; сезоны считаются по диску. `apply_manual_library()` в `cache_refresh.py` накладывает ручные карточки последним шагом `refresh_local()`. Жанры и рейтинг лежат в `manual_meta.extra_json`.
 
 `/api/library/merge` (`source_*`, `target_*`, `season`) переносит файлы присоединяемого проекта в папку основного через `move_merge()`: сериал — в `Season NN` (номер из `guess_merge_season()`, если не задан), фильм — в папку фильма. Серии, лежавшие в корне основного проекта без Sonarr, сначала складываются в `Season 01`. Карточка и `manual_meta` присоединённого проекта удаляются, его тайтл снимается с ARR, задачи qBittorrent снимаются.
+
+### 5.1.3 Коллекции фильмов
+
+Раздача из нескольких разных фильмов раскладывается по папкам «Название (Год)»: организатором при завершении загрузки, при переносе папки в «Фильмы» из проводника (`/api/import-folder`) и кнопкой «Разложить по карточкам» в карточке (`/api/library/split-collection`, предварительный список — `/api/library/collection-preview`). Правила распознавания — `download_organizer.collection_parts()`: не меньше двух полноразмерных видео, без сэмплов и бонусов, не серии, не CD1/CD2 и не Blu-ray, разные названия или годы. Субтитры и дорожки «<имя видео>.*» переезжают со своим фильмом, оставшиеся видео — в «<коллекция> — доп. материалы». Перед переносом проверяются конфликты всех частей: при конфликте не переносится ничего. Разложенные фильмы сразу собираются в коллекцию библиотеки.
+
+Коллекции библиотеки — таблицы `library_collections` и `library_collection_items` (путь проекта, порядок); проект входит не больше чем в одну. API: GET `/api/collections?kind=`, POST `/api/collections` (`title`, `paths` — JSON-список папок), POST `/api/collections/{id}` (новое `title` и/или полный `paths`), POST `/api/collections/{id}/delete`. В «Моей библиотеке» коллекция — карточка-стопка, её фильмы в сетке не повторяются; «Собрать коллекцию» включает выбор фильмов по порядку. Переименование, объединение и удаление проектов поправляют пути в коллекциях.
 
 ### 5.2 Поиск релизов
 
