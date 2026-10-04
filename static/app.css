@@ -1018,3 +1018,5 @@ input[type=checkbox]:focus-visible,input[type=radio]:focus-visible{outline:2px s
 /* На узком экране карточка библиотеки — колонка, а не строка: постер держит свою пропорцию
    (общее правило .posterButton для строк каталога сжимало его до полоски). */
 @media(max-width:760px){.libraryShelf .libraryCard .posterButton{aspect-ratio:2/3;height:auto!important;min-height:0}}
+/* Кнопка «Избранное» в заголовке карточки не заходит под крестик закрытия окна. */
+#mediaModal .detailTitleRow{padding-right:44px}

@@ -45,8 +45,9 @@ cp -a "$SRC/static/." "$APPDIR/static/"
 if [[ ! -x "$APPDIR/venv/bin/python" ]]; then
   python3 -m venv "$APPDIR/venv"
 fi
-"$APPDIR/venv/bin/pip" install -q --upgrade pip
-"$APPDIR/venv/bin/pip" install -q -r "$APPDIR/requirements.txt"
+# pip через python -m: после автообновления venv собран в staging-папке, и у скрипта bin/pip битый shebang.
+"$APPDIR/venv/bin/python" -m pip install -q --upgrade pip
+"$APPDIR/venv/bin/python" -m pip install -q -r "$APPDIR/requirements.txt"
 
 if [[ ! -f /etc/mediahub.env ]]; then
 cat > /etc/mediahub.env <<'EOF'

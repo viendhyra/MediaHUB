@@ -1,0 +1,181 @@
+/* ============ Adaptive Cinematic UI (бета) ============
+   Второй интерфейс MediaHub. Включается на устройстве в «Настройки → Интерфейс»
+   и действует только при html[data-ui="cinematic"]; классический вид этот файл не трогает.
+   Разметка и логика общие: здесь только токены, поверхности, компоненты и движение.
+   Этап 1: токены, каркас (фон, верхняя панель, боковое меню), кнопки, поля, панели, окна. */
+
+/* --- tokens --- */
+:root[data-ui="cinematic"]{
+ --c-canvas:#08090B;--c-surface:#0D0F13;--c-surface-plus:#171A20;--c-surface-hi:#1E222A;
+ --c-primary:#8BB7FF;--c-primary-hi:#A9CAFF;--c-primary-ink:#071631;--c-violet:#9B7CFF;--c-rose:#FF657D;
+ --c-line:rgba(255,255,255,.08);--c-line-hi:rgba(255,255,255,.14);--c-line-sel:rgba(139,183,255,.55);
+ --c-fill-1:rgba(255,255,255,.04);--c-fill-2:rgba(255,255,255,.075);--c-fill-3:rgba(255,255,255,.12);
+ --c-glass:rgba(13,15,19,.72);--c-blur:blur(20px) saturate(140%);
+ --c-shadow:0 24px 70px rgba(0,0,0,.28);--c-shadow-lift:0 28px 80px rgba(0,0,0,.42);
+ --c-glow:0 0 0 1px var(--c-line-sel),0 14px 44px rgba(139,183,255,.16);
+ --c-r-chip:16px;--c-r-card:22px;--c-r-panel:28px;--c-r-major:34px;
+ --c-hover:.19s ease-out;--c-panel-ease:cubic-bezier(.22,1,.36,1);--c-focus-ease:cubic-bezier(.2,.8,.2,1);
+ /* Токены классического интерфейса переводятся на новую палитру: все экраны перекрашиваются без копии стилей. */
+ --bg:#08090B;--bg2:#0B0D10;--panel:#0D0F13;--panel2:#171A20;--line:rgba(255,255,255,.10);--muted:#9AA3B2;--accent:#8BB7FF;--accent2:#8BB7FF;
+ --g-surface:#08090B;--g-surface1:#0B0D10;--g-surface2:#0D0F13;--g-surface3:#171A20;--g-surface4:#1E222A;
+ --g-outline:rgba(255,255,255,.10);--g-outline2:rgba(255,255,255,.20);
+ --g-text:#ECEFF4;--g-text2:#C6CCD6;--g-muted:#9AA3B2;
+ --g-blue:#8BB7FF;--g-blue-strong:#8BB7FF;--g-blue-ink:#071631;--g-blue-tint:rgba(139,183,255,.13);--g-primary:#8BB7FF;
+ --g-r-sm:12px;--g-r-md:16px;--g-r-lg:22px;--g-r-xl:28px;
+ --g-e1:0 6px 18px rgba(0,0,0,.22);--g-e2:0 16px 44px rgba(0,0,0,.30);--g-e3:0 24px 70px rgba(0,0,0,.40);
+ --g-fast:.19s ease-out;--g-med:.26s cubic-bezier(.22,1,.36,1);
+ color-scheme:dark;
+}
+:root[data-ui="cinematic"],:root[data-ui="cinematic"] body{background-color:var(--c-canvas)}
+/* Фон — слои, а не чистый чёрный: мягкий холодный свет сверху, без постоянного неона. */
+:root[data-ui="cinematic"] body{color:var(--g-text);background:
+ radial-gradient(1100px 620px at 12% -12%,rgba(139,183,255,.085),transparent 62%),
+ radial-gradient(900px 560px at 96% -8%,rgba(155,124,255,.06),transparent 60%),
+ linear-gradient(180deg,#0A0C0F 0,var(--c-canvas) 520px) fixed;background-color:var(--c-canvas)}
+:root[data-ui="cinematic"] *{scrollbar-color:rgba(255,255,255,.14) transparent}
+:root[data-ui="cinematic"] ::-webkit-scrollbar-thumb{background-color:rgba(255,255,255,.14)}
+:root[data-ui="cinematic"] ::-webkit-scrollbar-thumb:hover{background-color:rgba(255,255,255,.24)}
+:root[data-ui="cinematic"] ::selection{background:rgba(139,183,255,.32)}
+
+/* --- typography --- */
+:root[data-ui="cinematic"] h1,:root[data-ui="cinematic"] h2,:root[data-ui="cinematic"] h3{letter-spacing:-.02em;font-weight:600}
+:root[data-ui="cinematic"] .welcome h1{font-size:clamp(34px,4.2vw,56px);line-height:1.04;margin:8px 0 10px}
+:root[data-ui="cinematic"] .welcome p{color:var(--g-muted);font-size:15px}
+:root[data-ui="cinematic"] .homeSectionHead h2,:root[data-ui="cinematic"] .sectionTitle h2{font-size:24px}
+:root[data-ui="cinematic"] .panelHead h1,:root[data-ui="cinematic"] .setupHero h1{font-size:clamp(26px,2.6vw,34px)}
+:root[data-ui="cinematic"] :is(.eyebrow,.hubEyebrow,.watchEyebrow){font-size:11px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:rgba(139,183,255,.78)}
+
+/* --- top bar: стекло поверх контента --- */
+:root[data-ui="cinematic"] .topbar,:root[data-ui="cinematic"] .topbar.scrolled{background:rgba(8,9,11,.66);backdrop-filter:var(--c-blur);-webkit-backdrop-filter:var(--c-blur);border-bottom:1px solid transparent}
+:root[data-ui="cinematic"] .topbar.scrolled{border-bottom-color:var(--c-line)}
+:root[data-ui="cinematic"] .logoButton{font-weight:700;letter-spacing:.02em}
+:root[data-ui="cinematic"] .logoButton span{background:linear-gradient(90deg,var(--c-primary),var(--c-violet));-webkit-background-clip:text;background-clip:text;color:transparent}
+:root[data-ui="cinematic"] .desktopSearch{max-width:560px;min-width:360px}
+:root[data-ui="cinematic"] .desktopSearch form{background:var(--c-fill-1);border:1px solid var(--c-line);border-radius:999px;transition:background var(--c-hover),border-color var(--c-hover),box-shadow var(--c-hover)}
+:root[data-ui="cinematic"] .desktopSearch form:hover{border-color:var(--c-line-hi)}
+:root[data-ui="cinematic"] .desktopSearch form:focus-within{background:var(--c-fill-2);border-color:var(--c-line-sel);box-shadow:0 0 0 4px rgba(139,183,255,.12)}
+:root[data-ui="cinematic"] .desktopSearch input{background:transparent;border:0;box-shadow:none}
+:root[data-ui="cinematic"] .desktopSearch button{background:var(--c-primary);color:var(--c-primary-ink)}
+:root[data-ui="cinematic"] .desktopSearch button:hover{background:var(--c-primary-hi)}
+:root[data-ui="cinematic"] .iconBtn:hover{background:var(--c-fill-2)}
+
+/* --- side nav: компактная рейка 84 px, подписи раскрываются при наведении или фокусе --- */
+@media(min-width:761px) and (hover:hover){
+ :root[data-ui="cinematic"] .sideNav{width:84px;padding:14px 10px;gap:4px;overflow-y:auto;overflow-x:hidden;background:rgba(8,9,11,.6);backdrop-filter:var(--c-blur);-webkit-backdrop-filter:var(--c-blur);border-right:1px solid var(--c-line);transition:width .28s var(--c-panel-ease),box-shadow .28s var(--c-panel-ease),background .28s;scrollbar-width:none}
+ :root[data-ui="cinematic"] .sideNav::-webkit-scrollbar{display:none}
+ :root[data-ui="cinematic"] .sideNav:is(:hover,:has(:focus-visible)){width:232px;background:rgba(11,13,16,.92);box-shadow:24px 0 70px rgba(0,0,0,.45)}
+ :root[data-ui="cinematic"] .sideNav button{flex:0 0 auto;flex-direction:row;justify-content:flex-start;align-items:center;gap:14px;width:100%;min-height:46px;height:46px;padding:0 9px;border:1px solid transparent;border-radius:16px;color:var(--g-muted);white-space:nowrap;transition:background var(--c-hover),border-color var(--c-hover),color var(--c-hover)}
+ :root[data-ui="cinematic"] .sideNav button .navPill{width:28px;height:28px;flex:0 0 28px;border-radius:0;background:transparent!important}
+ :root[data-ui="cinematic"] .sideNav button b{font-size:14px;font-weight:500;color:inherit;opacity:0;transform:translateX(-6px);transition:opacity .2s ease-out,transform .28s var(--c-panel-ease)}
+ :root[data-ui="cinematic"] .sideNav:is(:hover,:has(:focus-visible)) button b{opacity:1;transform:none}
+ :root[data-ui="cinematic"] .sideNav button:hover{background:var(--c-fill-1);color:var(--g-text)}
+ :root[data-ui="cinematic"] .sideNav button.active{background:linear-gradient(90deg,rgba(139,183,255,.16),rgba(139,183,255,.07));border-color:rgba(139,183,255,.24);color:var(--c-primary)}
+ :root[data-ui="cinematic"] .sideNav button.active b{color:var(--g-text);font-weight:600}
+ :root[data-ui="cinematic"] main{margin-left:84px}
+}
+/* Без мыши (планшет, ТВ-браузер) подписи не прячутся: кнопка с иконкой и подписью под ней. */
+@media(min-width:761px) and (hover:none){
+ :root[data-ui="cinematic"] .sideNav{background:rgba(8,9,11,.7);border-right:1px solid var(--c-line);backdrop-filter:var(--c-blur)}
+ :root[data-ui="cinematic"] .sideNav button.active .navPill{background:rgba(139,183,255,.16);color:var(--c-primary)}
+}
+:root[data-ui="cinematic"] main{max-width:1680px;padding:24px 28px 32px}
+
+/* --- surfaces --- */
+:root[data-ui="cinematic"] :is(.hero,.panel){background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,.012)),var(--c-surface);border:1px solid var(--c-line);border-radius:var(--c-r-panel);box-shadow:var(--c-shadow);padding:24px}
+:root[data-ui="cinematic"] :is(.setupHero,.browseHero){border:1px solid var(--c-line);border-radius:var(--c-r-panel);background:radial-gradient(700px 320px at 0 0,rgba(139,183,255,.13),transparent 70%),radial-gradient(600px 300px at 100% 0,rgba(155,124,255,.10),transparent 70%),var(--c-surface-plus)}
+:root[data-ui="cinematic"] :is(.miniRelease,.releaseCard,.sourceState,.svc,.providerRow,.fileRow,.dl,.healthCard,.activityRow,.setupCard,.diskCard,.networkDiag,.networkDiagItem,.qualityShow,.seasonCard,.collectionPart,.discoveryCard,.qualitySummary>div,.setupHost>div){background:var(--c-fill-1);border:1px solid var(--c-line)}
+:root[data-ui="cinematic"] :is(.qualityPrefs,.discoverySettings,.setupStorage,.setupIntegrations,.browseBlock,.ruFeedNotice,.existingStorageBox,.poolFields,.setupJob,.hubSettingsCard,.hubServerDetails){background:var(--c-fill-1);border:1px solid var(--c-line);border-radius:var(--c-r-card)}
+:root[data-ui="cinematic"] .hubTvInstall{background:rgba(0,0,0,.22);border:1px solid var(--c-line);border-radius:var(--c-r-card)}
+:root[data-ui="cinematic"] :is(.searchProgress,.moveHint,.grabHint,.smartBestBanner,.detailOwned,.browseUnderstood,.restartNotice,.setupSafety,.storageEnvironmentHint,.searchCorrection,.sourceDiag,.tempCredential,.browseCacheBadge){background:var(--c-fill-2);border:1px solid var(--c-line)}
+:root[data-ui="cinematic"] :is(.setupIcon,.releaseIcon,.activityIcon,.diskGlyph,.poolStateIcon){background:rgba(139,183,255,.10);color:var(--c-primary)}
+
+/* --- controls --- */
+:where(:root[data-ui="cinematic"]) :is(button,select,input,textarea){border-radius:var(--c-r-chip)}
+:where(:root[data-ui="cinematic"]) button{background:var(--c-fill-2);color:var(--g-text);border:1px solid transparent;transition:background var(--c-hover),border-color var(--c-hover),box-shadow var(--c-hover),color var(--c-hover),translate var(--c-hover)}
+:where(:root[data-ui="cinematic"]) button:hover{background:var(--c-fill-3);border-color:transparent}
+:where(:root[data-ui="cinematic"]) button:active{background:rgba(255,255,255,.16)}
+:where(:root[data-ui="cinematic"]) :is(select,input,textarea){background:rgba(0,0,0,.24);border:1px solid var(--c-line-hi);color:var(--g-text)}
+:where(:root[data-ui="cinematic"]) :is(select,input,textarea):hover{border-color:rgba(255,255,255,.22)}
+:where(:root[data-ui="cinematic"]) :is(input,select,textarea):focus{outline:0;border-color:var(--c-line-sel);box-shadow:0 0 0 4px rgba(139,183,255,.14)}
+:root[data-ui="cinematic"] :focus-visible{outline:3px solid rgba(139,183,255,.85);outline-offset:3px}
+:root[data-ui="cinematic"] :is(.primary,.setupPrimary){background:var(--c-primary);color:var(--c-primary-ink);border-color:transparent;border-radius:999px;font-weight:600;box-shadow:0 10px 30px rgba(139,183,255,.18)}
+:root[data-ui="cinematic"] :is(.primary,.setupPrimary):hover{background:var(--c-primary-hi);box-shadow:0 14px 38px rgba(139,183,255,.26);translate:0 -1px}
+:root[data-ui="cinematic"] .softBtn{background:var(--c-fill-2);color:var(--g-text);border:1px solid var(--c-line);border-radius:999px}
+:root[data-ui="cinematic"] .softBtn:hover{background:var(--c-fill-3);border-color:var(--c-line-hi)}
+:root[data-ui="cinematic"] :is(.type,.browseKind,.browseChip,.watchSeason,.sectionMore){background:transparent;border:1px solid var(--c-line-hi);color:var(--g-text2)}
+:root[data-ui="cinematic"] :is(.type,.browseKind,.browseChip,.watchSeason):hover{background:var(--c-fill-1);border-color:rgba(255,255,255,.24)}
+:root[data-ui="cinematic"] :is(.type.active,.browseKind.active,.browseChip.active,.bindKind.active,.favKind.active,.watchSeason.active,.modeBtn.active){background:rgba(139,183,255,.14);border-color:rgba(139,183,255,.40);color:var(--c-primary)}
+:root[data-ui="cinematic"] .sectionMore{color:var(--c-primary)}
+:root[data-ui="cinematic"] .sectionMore:hover{background:rgba(139,183,255,.10);border-color:rgba(139,183,255,.40)}
+:root[data-ui="cinematic"] .modeSwitch{border:1px solid var(--c-line);background:rgba(0,0,0,.2)}
+:root[data-ui="cinematic"] :is(.searchField,.browseSearchField){background:rgba(0,0,0,.24);border:1px solid var(--c-line-hi)}
+:root[data-ui="cinematic"] :is(.searchField,.browseSearchField):focus-within{border-color:var(--c-line-sel);box-shadow:0 0 0 4px rgba(139,183,255,.14)}
+:root[data-ui="cinematic"] :is(.searchField,.browseSearchField) input{background:transparent;border:0;box-shadow:none}
+:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav){background:rgba(8,9,11,.55);border:1px solid var(--c-line);backdrop-filter:blur(12px)}
+:root[data-ui="cinematic"] :is(.heartBtn,.heartLarge,.browseFav):hover{color:var(--c-rose);border-color:rgba(255,101,125,.45)}
+:root[data-ui="cinematic"] .dangerBtn{color:#FF8A9C;background:rgba(255,101,125,.10);border-color:transparent}
+:root[data-ui="cinematic"] .dangerBtn:hover{background:rgba(255,101,125,.18)}
+:root[data-ui="cinematic"] .dangerBtn.solid{background:var(--c-rose);color:#2a0710}
+:root[data-ui="cinematic"] .linkbtn{color:var(--c-primary)}
+:root[data-ui="cinematic"] .hubQuickLinks a{border:1px solid var(--c-line-hi);background:var(--c-fill-1);transition:background var(--c-hover),border-color var(--c-hover)}
+:root[data-ui="cinematic"] .hubQuickLinks a:hover{background:var(--c-fill-2);border-color:rgba(139,183,255,.4)}
+
+/* --- карточки и полки: лёгкий подъём вместо масштаба (полный редизайн карточек — этап 2) --- */
+:root[data-ui="cinematic"] :is(.card,.browseCard){background:var(--c-surface);border:1px solid var(--c-line);border-radius:var(--c-r-card);overflow:hidden;transition:translate var(--c-hover),border-color var(--c-hover),box-shadow var(--c-hover),background var(--c-hover)}
+:root[data-ui="cinematic"] :is(.card,.browseCard):hover{background:var(--c-surface-plus);border-color:var(--c-line-hi);box-shadow:var(--c-shadow-lift);translate:0 -4px}
+:root[data-ui="cinematic"] .shelfCard{border-radius:var(--c-r-card);background:var(--c-surface-plus);box-shadow:inset 0 0 0 1px var(--c-line);transition:translate var(--c-hover),box-shadow var(--c-hover)}
+:root[data-ui="cinematic"] .shelfCard:hover{transform:none;translate:0 -4px;box-shadow:inset 0 0 0 1px var(--c-line-hi),var(--c-shadow-lift)}
+:root[data-ui="cinematic"] .shelfCard:focus-visible{outline:0;box-shadow:inset 0 0 0 1px var(--c-line-sel),var(--c-glow)}
+:root[data-ui="cinematic"] :is(.detailPoster,.qualityPoster,.browsePoster,.posterButton,.skeletonCard){background:var(--c-surface-plus)}
+:root[data-ui="cinematic"] .skeletonTitle{background:var(--c-surface-plus)}
+:root[data-ui="cinematic"] .railBtn{background:rgba(23,26,32,.88);border:1px solid var(--c-line-hi);backdrop-filter:var(--c-blur)}
+:root[data-ui="cinematic"] .railBtn:hover{background:rgba(30,34,42,.95)}
+:root[data-ui="cinematic"] :is(.bar,.setupProgress,.episodeProgress){background:rgba(255,255,255,.09)}
+:root[data-ui="cinematic"] :is(.bar span,.setupProgress i,.episodeProgress i){background:linear-gradient(90deg,var(--c-primary),#A7C6FF)}
+:root[data-ui="cinematic"] :is(.chips span,.genrePills span,.detailFacts span,.sourceBadge,.jellyfinTag,.statePill,.integrationState span,.localeBadge,.poolMembers span){background:var(--c-fill-2);border:1px solid var(--c-line);color:var(--g-text2)}
+
+/* --- окна: крупная поверхность 34 px, мягкое стекло фона, появление снизу --- */
+:root[data-ui="cinematic"] :is(.modal,.watchProjectModal){background:rgba(4,5,7,.62);backdrop-filter:blur(18px) saturate(120%);-webkit-backdrop-filter:blur(18px) saturate(120%)}
+:root[data-ui="cinematic"] :is(.modalbox,.detailbox,.watchProjectBox){background:linear-gradient(180deg,rgba(255,255,255,.03),transparent 220px),var(--c-surface);border:1px solid var(--c-line);border-radius:var(--c-r-major);box-shadow:0 40px 120px rgba(0,0,0,.6)}
+:root[data-ui="cinematic"] .modal:not(.hidden)>:is(.modalbox,.detailbox){animation:mhCinePanel .32s var(--c-panel-ease) both}
+:root[data-ui="cinematic"] :is(.closeBtn,.watchClose){background:rgba(255,255,255,.07);border:1px solid var(--c-line)}
+:root[data-ui="cinematic"] :is(.closeBtn,.watchClose):hover{background:rgba(255,255,255,.14)}
+:root[data-ui="cinematic"] :is(.modal,.watchProjectModal) .softBtn{background:var(--c-fill-2);border:1px solid var(--c-line)}
+:root[data-ui="cinematic"] :is(.modal,.watchProjectModal) .softBtn:hover{background:var(--c-fill-3)}
+:root[data-ui="cinematic"] .watchBackdrop:after{background:linear-gradient(90deg,rgba(13,15,19,.6),rgba(13,15,19,.9)),linear-gradient(0deg,var(--c-surface),transparent 60%)}
+:root[data-ui="cinematic"] .episodeCard{background:var(--c-fill-1);border:1px solid var(--c-line);border-radius:var(--c-r-card)}
+:root[data-ui="cinematic"] .episodeCard:hover{background:var(--c-fill-2);border-color:var(--c-line-hi);translate:0 -2px}
+:root[data-ui="cinematic"] .episodePlay{background:var(--c-primary);color:var(--c-primary-ink)}
+:root[data-ui="cinematic"] .toast{background:rgba(23,26,32,.92);color:var(--g-text);border:1px solid var(--c-line-hi);border-radius:var(--c-r-chip);backdrop-filter:var(--c-blur);box-shadow:var(--c-shadow-lift)}
+:root[data-ui="cinematic"] .toast.bad{background:rgba(58,16,24,.94);color:#FFD5DC;border-color:rgba(255,101,125,.45)}
+:root[data-ui="cinematic"] .spinner{border-color:rgba(255,255,255,.1);border-top-color:var(--c-primary)}
+
+/* --- движение: смена раздела — fade + 10 px, без полноэкранных слайдов --- */
+:root[data-ui="cinematic"] main>.page:not(.hidden){animation:mhCinePage .3s var(--c-panel-ease) both}
+@keyframes mhCinePage{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes mhCinePanel{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){:root[data-ui="cinematic"] :is(main>.page,.modalbox,.detailbox){animation:none!important}:root[data-ui="cinematic"] *{translate:none!important}}
+
+/* --- телефон: те же токены; отдельная мобильная композиция — этап 6 --- */
+@media(max-width:760px){
+ :root[data-ui="cinematic"] main{padding:12px 16px 20px}
+ :root[data-ui="cinematic"] :is(.homeSectionHead h2,.sectionTitle h2){font-size:20px}
+ :root[data-ui="cinematic"] :is(.hero,.panel){border-radius:var(--c-r-card);padding:16px}
+ :root[data-ui="cinematic"] :is(.modalbox,.detailbox){border-radius:var(--c-r-panel) var(--c-r-panel) 0 0}
+ :root[data-ui="cinematic"] .shelfCard{border-radius:18px}
+ :root[data-ui="cinematic"] .mobileNav{background:rgba(11,13,16,.94);backdrop-filter:var(--c-blur);border-left:1px solid var(--c-line)}
+ :root[data-ui="cinematic"] .mobileNav button.active{background:rgba(139,183,255,.14)!important;border-color:rgba(139,183,255,.3)!important;color:var(--c-primary)!important}
+}
+
+/* ============ Переключатель интерфейса в «Настройках» (виден в обоих интерфейсах) ============ */
+.uiSkinCard{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px 24px;align-items:center;margin:0 0 18px;padding:18px 20px;border-radius:var(--g-r-lg,16px);background:var(--g-surface2,#1e1f20);border:1px solid rgba(255,255,255,.06)}
+.uiSkinCard h2{margin:6px 0 4px;font-size:18px}.uiSkinCard p{margin:0;color:var(--g-muted,#9aa0a6);line-height:1.55;font-size:13px}
+.uiSkinOptions{display:flex;gap:10px;flex-wrap:wrap}
+.uiSkinOption{display:grid;grid-template-columns:44px auto;gap:12px;align-items:center;min-height:60px;padding:8px 16px 8px 8px;text-align:left;border:1px solid var(--g-outline,#3c4043)!important;background:transparent!important;border-radius:16px}
+.uiSkinOption:hover{background:rgba(255,255,255,.05)!important}
+.uiSkinOption.active{border-color:var(--g-blue,#a8c7fa)!important;background:var(--g-blue-tint,rgba(138,180,248,.14))!important}
+.uiSkinOption b{display:block;font-size:14px}.uiSkinOption small{display:block;font-size:11px;color:var(--g-muted,#9aa0a6)}
+.uiSkinSwatch{width:44px;height:44px;border-radius:12px;border:1px solid rgba(255,255,255,.1)}
+.uiSkinSwatch.classic{background:linear-gradient(135deg,#1e1f20 0 50%,#a8c7fa 50% 60%,#232425 60%)}
+.uiSkinSwatch.cinematic{background:radial-gradient(circle at 25% 20%,rgba(139,183,255,.55),transparent 55%),radial-gradient(circle at 85% 90%,rgba(155,124,255,.45),transparent 55%),#08090B}
+@media(max-width:760px){.uiSkinCard{grid-template-columns:1fr}.uiSkinOptions{display:grid;grid-template-columns:1fr 1fr}.uiSkinOption{padding-right:10px}}
