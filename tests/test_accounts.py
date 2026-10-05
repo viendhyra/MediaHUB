@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 import ast, hashlib, hmac, secrets, re, os, shutil, subprocess, json, threading, types, sys, ipaddress
 from contextvars import ContextVar
 from urllib.parse import quote
-from fastapi import FastAPI, Form, Query, HTTPException
+from fastapi import FastAPI, Form, Query, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse, Response, FileResponse, StreamingResponse
 from starlette.requests import Request
 
@@ -20,13 +20,13 @@ portal=types.ModuleType('account_test_portal');sys.modules[portal.__name__]=port
 portal.__dict__.update(dict(Path=Path,ipaddress=ipaddress,hashlib=hashlib,hmac=hmac,secrets=secrets,re=re,os=os,shutil=shutil,
     subprocess=subprocess,json=json,threading=threading,ContextVar=ContextVar,quote=quote,
     time=time,sqlite3=sqlite3,asyncio=asyncio,FastAPI=FastAPI,Form=Form,Query=Query,HTTPException=HTTPException,
-    JSONResponse=JSONResponse,Response=Response,FileResponse=FileResponse,StreamingResponse=StreamingResponse,Request=Request,
+    UploadFile=UploadFile,File=File,JSONResponse=JSONResponse,Response=Response,FileResponse=FileResponse,StreamingResponse=StreamingResponse,Request=Request,
     app=FastAPI(),CACHE_DB=Path('unused'),MEDIA_ROOT=Path('unused'),TV_ROOT=Path('unused'),MOVIES_ROOT=Path('unused'),ANIME_ROOT=Path('unused'),
     VIDEO_EXTS={'.mp4','.mkv'},PLAYER_PROBE_CACHE={},PLAYER_TRANSCODES=set(),PLAYER_THUMB_ROOT=Path('unused'),PLAYER_THUMB_LOCK=threading.Lock(),library_files=None))
 tree=ast.parse((Path(__file__).parents[1]/'app.py').read_text(encoding='utf-8'))
 names={'account_access','cache_db','safe_media_path','is_media_root','_project_root_for','_check_project_file'}
 nodes=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and (n.name in names or n.name.startswith(('auth_','player_','remote_')))
-    or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id.startswith(('AUTH_','REMOTE_')) for t in n.targets)]
+    or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id.startswith(('AUTH_','REMOTE_','FAMILY_')) for t in n.targets)]
 exec(compile(ast.Module(body=nodes,type_ignores=[]),'app.py','exec'),portal.__dict__)
 @portal.app.get('/api/version')
 def version():
@@ -172,6 +172,26 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(web.post('/api/auth/switch',data={'login':'alice'},headers=auth).status_code,200)
         self.assertEqual(web.get('/api/auth/me').json()['login'],'alice')
         guest.close();web.close()
+
+    def test_avatars_presets_photos_and_rights(self):
+        """Аватарка: встроенная и фото; чужую меняет только админ; фото доступно без входа по текущему адресу."""
+        r=self.user.post('/api/auth/avatar',data={'preset':3});self.assertEqual(r.json()['avatarPreset'],3)
+        self.assertEqual(self.user.post('/api/auth/avatar',data={'preset':99}).status_code,400)
+        admin_id=self.admin.get('/api/auth/me').json()['id'];alice_id=self.user.get('/api/auth/me').json()['id']
+        self.assertEqual(self.user.post('/api/auth/avatar',data={'preset':1,'user_id':admin_id}).status_code,403)
+        self.assertEqual(self.admin.post('/api/auth/avatar',data={'preset':5,'user_id':alice_id}).json()['avatarPreset'],5)
+        with patch.object(portal,'auth_avatar_image',lambda data:b'\xff\xd8'+data):
+            first=self.user.post('/api/auth/avatar',files={'image':('me.jpg',b'one','image/jpeg')}).json()['avatar']
+            second=self.user.post('/api/auth/avatar',files={'image':('me.jpg',b'two','image/jpeg')}).json()['avatar']
+        self.assertRegex(second,r'^/api/avatar/%d-[0-9a-f]{16}\.jpg$'%alice_id)
+        guest=TestClient(portal.app)
+        r=guest.get(second);self.assertEqual((r.status_code,r.content),(200,b'\xff\xd8two'))
+        self.assertEqual(guest.get(first).status_code,404)
+        self.assertEqual(guest.get('/api/avatar/1-0123456789abcdef.png').status_code,404)
+        self.assertEqual(self.user.get('/api/auth/me').json()['avatar'],second)
+        self.assertEqual([x['avatar'] for x in self.admin.get('/api/auth/accounts').json()['items'] if x['id']==alice_id],[second])
+        r=self.user.post('/api/auth/avatar',data={'preset':0}).json();self.assertEqual((r['avatar'],r['avatarPreset']),('',0))
+        self.assertEqual(guest.get(second).status_code,404);guest.close()
 
     def test_stream_limit_encodes_video_and_accounts_for_audio(self):
         """H.264 перекодируется при лимите, вместо обхода ограничения через copy."""

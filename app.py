@@ -366,6 +366,8 @@ app.add_middleware(GZipMiddleware,minimum_size=800)
 AUTH_USER=ContextVar('mediahub_account',default=None)
 AUTH_TOKEN=ContextVar('mediahub_token',default='')
 AUTH_FAILURES={}
+# Когда аккаунт последний раз обращался к порталу: «в сети» для семьи.
+AUTH_SEEN={}
 
 
 def auth_password(password,salt=None):
@@ -382,8 +384,39 @@ def auth_user_id():
 
 
 def auth_public(user):
-    """Описание аккаунта без хеша пароля."""
-    return {'id':user['id'],'login':user['login'],'isAdmin':bool(user['is_admin'])}
+    """Описание аккаунта без хеша пароля: аватарка — адрес фото или номер встроенной (0 — буква)."""
+    avatar=(user['avatar'] if 'avatar' in user.keys() else '') or ''
+    preset=avatar[7:] if avatar.startswith('preset:') else ''
+    return {'id':user['id'],'login':user['login'],'isAdmin':bool(user['is_admin']),
+            'avatar':f"/api/avatar/{user['id']}-{avatar[4:]}.jpg" if avatar.startswith('img:') else '',
+            'avatarPreset':int(preset) if preset.isdigit() else 0,
+            'showActivity':bool(user['show_activity']) if 'show_activity' in user.keys() else True}
+
+
+AUTH_AVATAR_PRESETS=12
+
+# Маршруты, которые обычный аккаунт может вызывать: загрузки и правка своих тайтлов.
+FAMILY_USER_POSTS={'/api/add','/api/torrent-upload','/api/torrent-page-preview','/api/provider-grab','/api/series/download',
+    '/api/movie/collection-download','/api/library/rename','/api/library/manual-meta','/api/library/attach-page',
+    '/api/library/merge','/api/library/file-rename','/api/library/file-move','/api/library/split-collection',
+    '/api/download-action'}
+
+
+def auth_avatar_dir():
+    """Фото аккаунтов лежат рядом с базой и переживают обновление кода."""
+    return Path(CACHE_DB).parent/'avatars'
+
+
+def auth_avatar_image(data):
+    """Привести фото к квадрату 256×256 JPEG через FFmpeg; чужие форматы и мусор отклоняются."""
+    binary=player_binary('ffmpeg')
+    if not binary:raise HTTPException(503,'FFmpeg недоступен: загрузить фото нельзя, выберите готовую аватарку')
+    try:result=subprocess.run([binary,'-hide_banner','-loglevel','error','-i','pipe:0','-frames:v','1',
+        '-vf',"crop=w='min(iw,ih)':h='min(iw,ih)',scale=256:256",'-q:v','3','-f','image2','-c:v','mjpeg','pipe:1'],
+        input=data,capture_output=True,timeout=20)
+    except subprocess.TimeoutExpired:raise HTTPException(400,'Фото обрабатывается слишком долго')
+    if result.returncode or not result.stdout.startswith(b'\xff\xd8'):raise HTTPException(400,'Не удалось прочитать фото: нужен JPG, PNG или WebP')
+    return result.stdout
 
 
 def auth_resolve(token):
@@ -462,7 +495,8 @@ def auth_same_origin(request):
 async def account_access(request:Request,call_next):
     """Защитить API, разделить историю и запретить управление сервером обычным аккаунтам."""
     path=request.url.path
-    if not path.startswith('/api/') or path in {'/api/version','/api/discovery','/api/apps','/api/apps/android/download','/api/auth/login','/api/auth/known','/api/auth/switch'}:
+    # /api/federation/* — запросы другого MediaHub: без входа, но с проверкой подписи в каждом маршруте.
+    if not path.startswith('/api/') or path.startswith(('/api/avatar/','/api/federation/')) or path in {'/api/version','/api/discovery','/api/apps','/api/apps/android/download','/api/auth/login','/api/auth/known','/api/auth/switch'}:
         return await call_next(request)
     bearer=request.headers.get('authorization','')
     token=bearer[7:] if bearer.startswith('Bearer ') else request.cookies.get('mh_session','')
@@ -470,10 +504,13 @@ async def account_access(request:Request,call_next):
     if not user:return JSONResponse({'detail':'Войдите в аккаунт'},status_code=401,headers={'Cache-Control':'no-store'})
     if request.method not in {'GET','HEAD','OPTIONS'} and not bearer.startswith('Bearer ') and request.headers.get('x-mediahub-auth')!='1':
         return JSONResponse({'detail':'Запрос требует подтверждения сессии'},status_code=403)
-    personal=path.startswith('/api/auth/') or path in {'/api/player/progress','/api/remote/poll','/api/remote/state','/api/remote/send'}
-    administrative=path.startswith(('/api/setup','/api/updates','/api/auth/accounts','/api/auth/addresses','/api/activity','/api/service','/api/storage','/api/apps/tv-install','/api/preferences'))
+    personal=path.startswith(('/api/auth/','/api/my-library/','/api/favorites')) or path in {'/api/player/progress','/api/remote/poll','/api/remote/state','/api/remote/send','/api/family/feed/seen','/api/friends/check','/api/friends/hide'}
+    # «Семья»: скачивать может любой аккаунт; править — автор (проверка в самом маршруте).
+    personal=personal or path in FAMILY_USER_POSTS or bool(re.fullmatch(r'/api/friends/[0-9a-f]{16,64}/download|/api/friends/downloads/\d+/cancel',path))
+    administrative=path.startswith(('/api/setup','/api/updates','/api/auth/accounts','/api/auth/addresses','/api/friends/me','/api/friends/add','/api/friends/remove','/api/family/summary','/api/family/owner','/api/activity','/api/service','/api/storage','/api/apps/tv-install','/api/preferences'))
     if not user['is_admin'] and (administrative or (request.method not in {'GET','HEAD','OPTIONS'} and not personal)):
         return JSONResponse({'detail':'Доступно только администратору'},status_code=403)
+    AUTH_SEEN[user['id']]=time.time()
     context=AUTH_USER.set(user);session=AUTH_TOKEN.set(hashlib.sha256(token.encode()).hexdigest())
     try:
         response=await call_next(request)
@@ -548,6 +585,40 @@ def auth_logout(request:Request):
     response=JSONResponse({'ok':True});response.delete_cookie('mh_session')
     auth_set_known(response,request,[t for t in auth_known_tokens(request) if hashlib.sha256(t.encode()).hexdigest()!=AUTH_TOKEN.get()])
     return response
+
+
+@app.post('/api/auth/avatar')
+async def auth_set_avatar(preset:int=Form(-1),user_id:int=Form(0),image:UploadFile|None=File(None)):
+    """Сменить аватарку: фото, встроенная (1–12) или буква (0). Чужую — только администратор."""
+    user=AUTH_USER.get();target=user_id or user['id']
+    if target!=user['id'] and not user['is_admin']:raise HTTPException(403,'Нельзя менять чужую аватарку')
+    photo=auth_avatar_dir()/f'{target}.jpg'
+    if image is not None and image.filename:
+        data=await image.read(8*1024*1024+1)
+        if not data or len(data)>8*1024*1024:raise HTTPException(400,'Фото должно быть не больше 8 МБ')
+        jpeg=await asyncio.to_thread(auth_avatar_image,data)
+        photo.parent.mkdir(parents=True,exist_ok=True)
+        temp=photo.with_suffix('.tmp');temp.write_bytes(jpeg);temp.replace(photo)
+        value='img:'+hashlib.sha256(jpeg).hexdigest()[:16]
+    elif 0<=preset<=AUTH_AVATAR_PRESETS:
+        value=f'preset:{preset}' if preset else ''
+        photo.unlink(missing_ok=True)
+    else:raise HTTPException(400,'Выберите фото или аватарку из набора')
+    with cache_db() as con:
+        if not con.execute('update accounts set avatar=? where id=?',(value,target)).rowcount:raise HTTPException(404,'Аккаунт не найден')
+        con.commit();row=con.execute('select * from accounts where id=?',(target,)).fetchone()
+    return auth_public(row)
+
+
+@app.get('/api/avatar/{name}')
+def auth_avatar_file(name:str):
+    """Фото аккаунта для экрана «Кто смотрит?» — доступно без входа, адрес меняется с каждым фото."""
+    m=re.fullmatch(r'(\d+)-([0-9a-f]{16})\.jpg',name)
+    if not m:raise HTTPException(404,'Нет такой аватарки')
+    with cache_db() as con:row=con.execute('select avatar from accounts where id=?',(int(m.group(1)),)).fetchone()
+    photo=auth_avatar_dir()/f'{m.group(1)}.jpg'
+    if not row or row['avatar']!='img:'+m.group(2) or not photo.is_file():raise HTTPException(404,'Нет такой аватарки')
+    return FileResponse(photo,media_type='image/jpeg',headers={'Cache-Control':'public, max-age=31536000, immutable'})
 
 
 @app.get('/api/auth/addresses')
@@ -1534,6 +1605,38 @@ def cache_db():
         duration real not null, completed integer not null default 0,
         signature text not null, updated_at real not null)""")
     con.execute("create table if not exists accounts(id integer primary key autoincrement,login text not null unique,password_hash text not null,is_admin integer not null default 0)")
+    # 22.25 «Семья»: хранилище общее, у тайтла автор, у каждого аккаунта своя библиотека.
+    con.execute("create table if not exists title_owners(path text primary key,user_id integer not null,created_at real not null)")
+    con.execute("create table if not exists account_library(user_id integer not null,path text not null,added_at real not null,source text not null default 'own',primary key(user_id,path))")
+    # Автор прямой загрузки по хешу: download_jobs организатор перезаписывает целиком.
+    con.execute("create table if not exists download_owners(hash text primary key,user_id integer not null,created_at real not null)")
+    # Заявки Sonarr/Radarr: папка появится позже, автора узнаём по id или названию.
+    con.execute("create table if not exists family_claims(kind text not null,external_id text,title_key text,user_id integer not null,created_at real not null)")
+    # 22.30: друзья — другие MediaHub, общий секрет на пару хабов; тайтлы, скрытые от друзей.
+    con.execute("create table if not exists friend_hubs(hub_id text primary key,name text not null,address text not null,secret text not null,status text not null default 'active',created_at real not null,last_seen real,last_error text)")
+    con.execute("create table if not exists friend_hidden(path text primary key,created_at real not null)")
+    # 22.31: скачивание тайтла у друга — задание с прогрессом и докачкой.
+    con.execute("""create table if not exists friend_downloads(id integer primary key autoincrement,hub_id text not null,remote_id text not null,
+        kind text not null,title text not null,year text,user_id integer not null,status text not null,total integer not null default 0,
+        done integer not null default 0,error text,dest text,meta text,created_at real not null,updated_at real not null)""")
+    # 22.33: избранное личное — данные тайтла общие (favorites), чьё оно — здесь.
+    con.execute("create table if not exists account_favorites(user_id integer not null,fav_key text not null,created_at text,primary key(user_id,fav_key))")
+    if not con.execute("select 1 from meta where key='favorites_migrated'").fetchone():
+        admin=con.execute("select id from accounts where is_admin=1 order by id limit 1").fetchone()
+        # На новой установке таблицы избранного ещё нет — переносить нечего.
+        if admin and con.execute("select 1 from sqlite_master where type='table' and name='favorites'").fetchone():
+            con.execute("insert or ignore into account_favorites select ?,fav_key,created_at from favorites",(admin['id'],))
+        con.execute("insert or ignore into meta(key,value) values('favorites_migrated','1')")
+    # 22.28: события семьи («Маша добавила …») и что из них уже видел каждый аккаунт.
+    con.execute("create table if not exists family_events(id integer primary key autoincrement,user_id integer not null,type text not null,path text,title text,kind text,created_at real not null)")
+    con.execute("create table if not exists account_event_seen(user_id integer primary key,last_id integer not null default 0)")
+    # 22.23: аватарка аккаунта — '' (буква), 'preset:N' или 'img:<хеш фото>'.
+    account_cols={r[1] for r in con.execute('pragma table_info(accounts)')}
+    if 'avatar' not in account_cols:
+        con.execute("alter table accounts add column avatar text not null default ''")
+    # 22.28: семья видит, что аккаунт сейчас смотрит, если он это не скрыл.
+    if 'show_activity' not in account_cols:
+        con.execute("alter table accounts add column show_activity integer not null default 1")
     con.execute("create table if not exists account_sessions(token_hash text primary key,user_id integer not null,expires real not null)")
     con.execute("""create table if not exists account_playback_history(
         user_id integer not null,path text not null,project text not null,position real not null,
@@ -2320,6 +2423,8 @@ def forget_media_path(path_key:str):
             # Вместе с папкой уходят и карточки всего, что лежало внутри неё.
             con.execute("delete from library_cache where rtrim(path,'/')=? or path like ?",(key,key+"/%"))
             con.execute("delete from manual_meta where path=? or path like ?",(key,key+"/%"))
+            con.execute("delete from title_owners where path=? or path like ?",(key,key+"/%"))
+            con.execute("delete from account_library where path=? or path like ?",(key,key+"/%"))
             con.commit()
     except Exception:
         pass
@@ -4029,6 +4134,9 @@ async def home_data(request:Request):
     own_resume=await asyncio.to_thread(player_resume_items)
     if own_resume:
         sections.append({"id":"web-resume","title":"Продолжить просмотр","type":"resume","sourceLabel":"MediaHub","items":own_resume})
+    family_new_rows=await asyncio.to_thread(family_new_items,"",24)
+    if family_new_rows:
+        sections.append({"id":"family-new","title":"Новое в семье","type":"media","sourceLabel":"Семья","items":family_new_rows})
 
     # v20.5 checks EVERY required shelf. Previously one working shelf (for
     # example TV popular) made MediaHub believe all discovery data existed, so
@@ -4116,8 +4224,10 @@ async def home_data(request:Request):
 
         # Personal library follows discovery shelves, so the first recommendation
         # users see is always movies rather than an old anime-only cache.
+        user=AUTH_USER.get()
         library=con.execute(
-            "select * from library_cache order by added_at desc limit 24"
+            "select * from library_cache where ? or rtrim(coalesce(path,''),'/') in (select path from account_library where user_id=?) order by added_at desc limit 24",
+            (0 if user else 1,user['id'] if user else 0)
         ).fetchall()
         if library:
             sections.append({
@@ -4187,8 +4297,944 @@ async def home_data(request:Request):
     }
 
 
+def family_inside(path,root):
+    """path совпадает с root или лежит внутри него."""
+    path=str(path or '').rstrip('/');root=str(root or '').rstrip('/')
+    return bool(path and root) and (path==root or path.startswith(root+'/'))
+
+
+def family_title_key(title):
+    """Название для сравнения заявки и появившейся папки: без регистра, пробелов и знаков."""
+    return re.sub(r'[\W_]+','',str(title or '').casefold())
+
+
+def family_admin_id(con):
+    """Администратор получает тайтлы без известного автора (скачанные раньше, положенные вручную)."""
+    row=con.execute('select id from accounts where is_admin=1 order by id limit 1').fetchone()
+    return row['id'] if row else 1
+
+
+def family_claim(kind,external_id,title):
+    """Запомнить, кто попросил Sonarr/Radarr скачать тайтл: папка появится позже."""
+    user=AUTH_USER.get()
+    if not user:return
+    with cache_db() as con:
+        con.execute('insert into family_claims values(?,?,?,?,?)',(kind,str(external_id or ''),family_title_key(title),user['id'],time.time()));con.commit()
+
+
+def family_mark_download(torrent_hash):
+    """Автор прямой загрузки — тот, кто её запустил."""
+    user=AUTH_USER.get()
+    if not user or not torrent_hash:return
+    with cache_db() as con:
+        con.execute('insert or replace into download_owners values(?,?,?)',(str(torrent_hash).lower(),user['id'],time.time()));con.commit()
+
+
+def family_prepare(con,kind,items):
+    """Назначить авторов новым тайтлам раздела. Первый раз всё скачанное — у администратора,
+    остальным — то, что они уже начали смотреть. Возвращает {путь: id автора}."""
+    paths=[str(x.get('path') or '').rstrip('/') for x in items if x.get('path') and x.get('hasFile',True)]
+    admin=family_admin_id(con);now=time.time()
+    owners={r['path']:r['user_id'] for r in con.execute('select path,user_id from title_owners')}
+    if not con.execute('select 1 from meta where key=?',('family_migrated_'+kind,)).fetchone():
+        history=con.execute('select distinct user_id,project from account_playback_history').fetchall()
+        for p in paths:
+            if p in owners:continue
+            con.execute('insert or ignore into title_owners values(?,?,?)',(p,admin,now));owners[p]=admin
+            con.execute("insert or ignore into account_library values(?,?,?,'own')",(admin,p,now))
+            for h in history:
+                if h['user_id']!=admin and family_inside(h['project'],p):
+                    con.execute("insert or ignore into account_library values(?,?,?,'added')",(h['user_id'],p,now))
+        con.execute("insert or replace into meta(key,value) values(?,'1')",('family_migrated_'+kind,))
+    missing=[p for p in paths if p not in owners]
+    if missing:
+        jobs=con.execute("select j.final_path,o.user_id from download_jobs j join download_owners o on lower(j.hash)=o.hash where coalesce(j.final_path,'')!=''").fetchall()
+        claims=con.execute('select * from family_claims where kind=? order by created_at desc',(kind,)).fetchall()
+        by_path={str(x.get('path') or '').rstrip('/'):x for x in items}
+        for p in missing:
+            item=by_path.get(p,{})
+            owner=next((j['user_id'] for j in jobs if family_inside(j['final_path'],p) or family_inside(p,j['final_path'])),None)
+            if owner is None:
+                ext=str(item.get('externalId') or item.get('external_id') or '');key=family_title_key(item.get('title'))
+                owner=next((c['user_id'] for c in claims if (ext and c['external_id']==ext) or (key and c['title_key']==key)),admin)
+            con.execute('insert or ignore into title_owners values(?,?,?)',(p,owner,now))
+            con.execute("insert or ignore into account_library values(?,?,?,'own')",(owner,p,now))
+            con.execute("insert into family_events(user_id,type,path,title,kind,created_at) values(?,'added',?,?,?,?)",(owner,p,str(item.get('title') or Path(p).name),kind,now))
+            owners[p]=owner
+    con.commit()
+    return owners
+
+
+def family_download_owners():
+    """{хеш торрента: (id автора, логин)} для списка загрузок."""
+    with cache_db() as con:
+        return {r['hash']:(r['user_id'],r['login']) for r in con.execute('select o.hash,o.user_id,a.login from download_owners o join accounts a on a.id=o.user_id')}
+
+
+def family_annotate(items):
+    """Карточки каталога, уже скачанные в семье: кто загрузил и есть ли в моей библиотеке.
+    Интерфейс предлагает «Добавить к себе» вместо повторной загрузки."""
+    user=AUTH_USER.get()
+    if not user or not any(x.get('inLibrary') and x.get('path') for x in items or []):return items
+    with cache_db() as con:
+        owners={r['path']:r['login'] for r in con.execute('select t.path,a.login from title_owners t join accounts a on a.id=t.user_id')}
+        mine={r['path'] for r in con.execute('select path from account_library where user_id=?',(user['id'],))}
+    for x in items:
+        p=str(x.get('path') or '').rstrip('/')
+        if x.get('inLibrary') and p in owners:x.update({'owner':owners[p],'inMyLibrary':p in mine})
+    return items
+
+
+def family_view(kind,items,scope='mine',owner=''):
+    """«Моя библиотека» (по умолчанию), вся «Семья» или библиотека участника.
+    У каждого тайтла — автор и права: править может автор или админ, удалять — только админ."""
+    user=AUTH_USER.get()
+    if not user:return items
+    with cache_db() as con:
+        owners=family_prepare(con,kind,items)
+        logins={r['id']:r['login'] for r in con.execute('select id,login from accounts')}
+        mine={r['path'] for r in con.execute('select path from account_library where user_id=?',(user['id'],))}
+        hidden={r['path'] for r in con.execute('select path from friend_hidden')}
+        claims=con.execute('select external_id,title_key from family_claims where user_id=? and kind=?',(user['id'],kind)).fetchall()
+        target=None
+        if owner:
+            row=con.execute('select id from accounts where login=?',(owner.strip().casefold(),)).fetchone()
+            if not row:raise HTTPException(404,'Нет такого участника')
+            target={r['path'] for r in con.execute('select path from account_library where user_id=?',(row['id'],))}
+    admin=bool(user['is_admin']);result=[]
+    for x in items:
+        p=str(x.get('path') or '').rstrip('/');author=owners.get(p)
+        x.update({'owner':logins.get(author,''),'inMyLibrary':p in mine,'canEdit':admin or (bool(p) and author==user['id']),'canDelete':admin,'hiddenFromFriends':p in hidden})
+        if target is not None:keep=p in target
+        elif scope=='family':keep=bool(p)
+        elif p:keep=p in mine
+        else:
+            # Ещё не скачанный тайтл (только отслеживается) виден тому, кто его заказал, и админу.
+            ext=str(x.get('externalId') or '');key=family_title_key(x.get('title'))
+            keep=admin or any((ext and c['external_id']==ext) or (key and c['title_key']==key) for c in claims)
+        if keep:result.append(x)
+    return result
+
+
+FAMILY_TORRENTS={'at':0.0,'ttl':0,'items':[]}
+
+
+async def family_torrents():
+    """Раздачи qBittorrent для карточек загрузок: не чаще раза в 4 секунды; если qBittorrent
+    молчит — пробуем снова через 30 секунд, чтобы библиотека не ждала его."""
+    if time.time()-FAMILY_TORRENTS['at']<FAMILY_TORRENTS['ttl']:return FAMILY_TORRENTS['items']
+    items=[];ttl=30
+    try:
+        c=await asyncio.wait_for(qbit_login(),4)
+        if c:
+            try:
+                r=await c.get(QBIT_URL+'/api/v2/torrents/info',timeout=4)
+                if r.status_code<300:items=r.json();ttl=4
+            finally:await c.aclose()
+    except Exception:pass
+    FAMILY_TORRENTS.update(at=time.time(),ttl=ttl,items=items)
+    return items
+
+
+def family_download_state(t):
+    """Подпись под кругом прогресса."""
+    state=str(t.get('state') or '');progress=float(t.get('progress') or 0)
+    if progress>=1 or state.endswith('UP') or state in {'uploading','forcedUP'}:return 'Переношу в библиотеку'
+    if state in {'pausedDL','stoppedDL'}:return 'Пауза'
+    if state=='metaDL':return 'Ищу раздачу'
+    if state=='queuedDL':return 'В очереди'
+    if state=='stalledDL':return 'Жду источники'
+    if state.startswith('checking'):return 'Проверяю файлы'
+    return 'Скачивается'
+
+
+def family_download_cards(kind,torrents,scope='mine',owner=''):
+    """Карточки того, что скачивается в раздел: раздачи qBittorrent и тайтлы от друзей.
+    Видно автору загрузки; во «Всей семье» — всем; админу в своей — ещё загрузки без автора."""
+    user=AUTH_USER.get()
+    with cache_db() as con:
+        jobs={str(r['hash']).lower():dict(r) for r in con.execute("select * from download_jobs where status='downloading' and kind=?",(kind,))}
+        if not jobs and not con.execute("select 1 from friend_downloads where kind=? and status in ('queued','downloading') limit 1",(kind,)).fetchone():return []
+        meta={str(r['hash']).lower():dict(r) for r in con.execute('select * from download_meta')}
+        owners={r['hash']:(r['user_id'],r['login']) for r in con.execute('select o.hash,o.user_id,a.login from download_owners o join accounts a on a.id=o.user_id')}
+        friends=con.execute("""select d.*,a.login,f.name friend from friend_downloads d left join accounts a on a.id=d.user_id left join friend_hubs f on f.hub_id=d.hub_id
+            where d.kind=? and d.status in ('queued','downloading') order by d.id""",(kind,)).fetchall()
+        target=None
+        if owner:
+            row=con.execute('select id from accounts where login=?',(owner.strip().casefold(),)).fetchone()
+            target=row['id'] if row else -1
+    def visible(uid):
+        if not user:return True
+        if target is not None:return uid==target
+        return scope=='family' or uid==user['id'] or (bool(user['is_admin']) and not uid)
+    cards=[]
+    for t in torrents:
+        h=str(t.get('hash') or '').lower();job=jobs.get(h)
+        if not job:continue
+        uid,login=owners.get(h,(0,''))
+        if not visible(uid):continue
+        m=meta.get(h) or {}
+        cards.append({'key':'dl:'+h,'title':m.get('title') or job['media_title'] or t.get('name') or 'Загрузка','year':str(m.get('year') or ''),
+                      'poster':m.get('poster') or '','overview':m.get('overview') or '','kind':kind,'season':job['season'],'owner':login,
+                      'path':'','hasFile':False,'inLibrary':False,'downloading':True,'downloadProgress':round(float(t.get('progress') or 0)*100,1),
+                      'downloadLabel':family_download_state(t),'downloadSource':'torrent','hash':h})
+    for d in friends:
+        if not visible(d['user_id']):continue
+        m=json.loads(d['meta'] or '{}')
+        cards.append({'key':f"friend:{d['id']}",'title':d['title'],'year':d['year'] or '','poster':m.get('poster',''),'overview':m.get('overview',''),'kind':kind,
+                      'owner':d['login'] or '','path':'','hasFile':False,'inLibrary':False,'downloading':True,
+                      'downloadProgress':round(d['done']*100/d['total'],1) if d['total'] else 0.0,
+                      'downloadLabel':('От друга «'+(d['friend'] or 'друг')+'»') if d['status']=='downloading' else 'В очереди у друга','downloadSource':'friend','jobId':d['id']})
+    return cards
+
+
+def family_with_downloads(items,cards):
+    """Новая серия уже имеющегося тайтла — круг прогресса на его карточке, остальное — новыми карточками впереди."""
+    if not cards:return items
+    fresh=[]
+    for c in cards:
+        key=family_title_key(c['title'])
+        same=next((x for x in items if x.get('path') and family_title_key(x.get('title'))==key
+                   and (not c['year'] or not x.get('year') or str(x.get('year'))[:4]==c['year'][:4])),None)
+        if same is not None:
+            same.update({k:c[k] for k in ('downloading','downloadProgress','downloadLabel','downloadSource')})
+        else:fresh.append(c)
+    return fresh+items
+
+
+def family_move(con,old,new):
+    """Папку переименовали или присоединили к другой: автор и личные библиотеки переезжают на новый путь."""
+    old=str(old or '').rstrip('/');new=str(new or '').rstrip('/')
+    if not old or not new or old==new:return
+    con.execute('insert or ignore into title_owners select ?,user_id,created_at from title_owners where path=?',(new,old))
+    con.execute('insert or ignore into account_library select user_id,?,added_at,source from account_library where path=?',(new,old))
+    con.execute('update account_playback_history set project=? where project=?',(new,old))
+    con.execute('delete from title_owners where path=?',(old,));con.execute('delete from account_library where path=?',(old,))
+
+
+def family_require_edit(kind='',item_key='',path=''):
+    """Править тайтл может только его автор или администратор."""
+    user=AUTH_USER.get()
+    if not user or user['is_admin']:return
+    p=str(path or '').rstrip('/')
+    if not p and item_key:p=str((find_library_row(kind,item_key,'') or {}).get('path') or '').rstrip('/')
+    with cache_db() as con:owners=con.execute('select path,user_id from title_owners').fetchall()
+    author=next((r['user_id'] for r in sorted(owners,key=lambda r:-len(r['path'])) if p and family_inside(p,r['path'])),None)
+    if author!=user['id']:raise HTTPException(403,'Править тайтл может только тот, кто его загрузил, или администратор')
+
+
+@app.post('/api/my-library/add')
+def family_library_add(path:str=Form(...)):
+    """Добавить тайтл из «Семьи» в свою библиотеку: файлы не копируются, смотреть можно независимо."""
+    p=str(path or '').rstrip('/')
+    with cache_db() as con:
+        if not con.execute('select 1 from title_owners where path=?',(p,)).fetchone():raise HTTPException(404,'Тайтл не найден в хранилище')
+        con.execute("insert or ignore into account_library values(?,?,?,'added')",(AUTH_USER.get()['id'],p,time.time()));con.commit()
+    return {'ok':True,'inMyLibrary':True}
+
+
+@app.post('/api/my-library/remove')
+def family_library_remove(path:str=Form(...)):
+    """Убрать тайтл из своей библиотеки. Файлы остаются в хранилище, у других он не пропадает."""
+    with cache_db() as con:
+        con.execute('delete from account_library where user_id=? and path=?',(AUTH_USER.get()['id'],str(path or '').rstrip('/')));con.commit()
+    return {'ok':True,'inMyLibrary':False}
+
+
+FAMILY_SYNC={'at':0.0}
+
+
+async def family_sync_all():
+    """Не чаще раза в минуту назначить авторов новым папкам всех разделов — так появляются события «добавил»."""
+    if time.time()-FAMILY_SYNC['at']<60:return
+    FAMILY_SYNC['at']=time.time()
+    for kind in ('movies','tv','anime'):
+        try:
+            items=await library_cached_all(kind)
+            def run(items=items,kind=kind):
+                with cache_db() as con:family_prepare(con,kind,items)
+            await asyncio.to_thread(run)
+        except Exception:pass
+    def jobs():
+        with cache_db() as con:family_job_events(con)
+    try:await asyncio.to_thread(jobs)
+    except Exception:pass
+
+
+def family_job_events(con):
+    """Докачанные серии к уже имеющемуся тайтлу — событие «новые серии» для семьи.
+    Новый тайтл целиком даёт событие «добавил» в family_prepare."""
+    mark=con.execute("select value from meta where key='family_jobs_at'").fetchone()
+    if not mark:
+        last=(con.execute("select max(completed_at) m from download_jobs where status='organized'").fetchone() or {'m':''})['m'] or ''
+        con.execute("insert or replace into meta(key,value) values('family_jobs_at',?)",(last,));con.commit();return
+    rows=con.execute("""select j.*,o.user_id from download_jobs j join download_owners o on lower(j.hash)=o.hash
+        where j.status='organized' and coalesce(j.completed_at,'')>? and coalesce(j.final_path,'')!='' order by j.completed_at""",(mark['value'],)).fetchall()
+    if not rows:return
+    owners=sorted((r['path'] for r in con.execute('select path from title_owners')),key=lambda p:-len(p))
+    for r in rows:
+        p=next((o for o in owners if family_inside(r['final_path'],o)),None)
+        if not p or con.execute('select 1 from family_events where path=? and created_at>?',(p,time.time()-3600)).fetchone():continue
+        card=family_title_rows(con,[p]).get(p)
+        con.execute("insert into family_events(user_id,type,path,title,kind,created_at) values(?,'updated',?,?,?,?)",
+                    (r['user_id'],p,(card['title'] if card else '') or r['media_title'] or Path(p).name,(card['kind'] if card else '') or r['kind'],time.time()))
+    con.execute("insert or replace into meta(key,value) values('family_jobs_at',?)",(rows[-1]['completed_at'],));con.commit()
+
+
+def family_title_rows(con,paths):
+    """Карточки библиотеки по путям проектов: название, постер, раздел."""
+    rows={}
+    for p in paths:
+        r=con.execute("select * from library_cache where rtrim(coalesce(path,''),'/')=? limit 1",(p,)).fetchone()
+        if r:rows[p]=r
+    return rows
+
+
+def family_presence(con,me):
+    """Кто из семьи в сети и что смотрит (по свежим отметкам прогресса плеера)."""
+    now=time.time();users=con.execute('select * from accounts order by login').fetchall()
+    recent=con.execute('select user_id,path,project,position,duration,updated_at from account_playback_history where updated_at>? order by updated_at desc',(now-120,)).fetchall()
+    titles=family_title_rows(con,{str(r['project']).rstrip('/') for r in recent})
+    out=[]
+    for u in users:
+        if u['id']==me:continue
+        watching=None
+        if u['show_activity']:
+            r=next((r for r in recent if r['user_id']==u['id']),None)
+            if r:
+                t=titles.get(str(r['project']).rstrip('/'))
+                watching={'title':(t['title'] if t else Path(r['project']).name),'detail':Path(r['path']).stem[:80],'path':str(r['project']),
+                          'kind':(t['kind'] if t else ''),'position':r['position'],'duration':r['duration']}
+        online=now-AUTH_SEEN.get(u['id'],0)<120
+        if online or watching:out.append({**auth_public(u),'online':online or bool(watching),'watching':watching})
+    return out
+
+
+@app.get('/api/family/feed')
+async def family_feed():
+    """Колокольчик: новые тайтлы семьи (кроме своих), кто в сети и что смотрит.
+    mine — свои последние события: клиенты показывают «Скачалось «…» — можно смотреть»."""
+    await family_sync_all()
+    me=AUTH_USER.get()['id']
+    def read():
+        with cache_db() as con:
+            seen=(con.execute('select last_id from account_event_seen where user_id=?',(me,)).fetchone() or {'last_id':0})['last_id']
+            rows=con.execute('select e.*,a.login,a.avatar,a.is_admin,a.show_activity from family_events e join accounts a on a.id=e.user_id where e.user_id!=? order by e.id desc limit 30',(me,)).fetchall()
+            mine={r['path'] for r in con.execute('select path from account_library where user_id=?',(me,))}
+            last=(con.execute('select max(id) m from family_events').fetchone() or {'m':0})['m'] or 0
+            own=[{'id':r['id'],'type':r['type'],'title':r['title'],'kind':r['kind'],'path':r['path'],'at':r['created_at']}
+                 for r in con.execute('select * from family_events where user_id=? order by id desc limit 10',(me,))]
+            events=[{'id':r['id'],'type':r['type'],'title':r['title'],'kind':r['kind'],'path':r['path'],'at':r['created_at'],
+                     'inMyLibrary':r['path'] in mine,'user':auth_public({**dict(r),'id':r['user_id']})} for r in rows]
+            return {'lastId':last,'seenId':seen,'unread':sum(1 for e in events if e['id']>seen),'events':events,'mine':own,'presence':family_presence(con,me)}
+    return await asyncio.to_thread(read)
+
+
+@app.post('/api/family/feed/seen')
+def family_feed_seen(last_id:int=Form(...)):
+    """Отметить события прочитанными (колокольчик открыт)."""
+    with cache_db() as con:
+        con.execute('insert into account_event_seen values(?,?) on conflict(user_id) do update set last_id=max(last_id,excluded.last_id)',(AUTH_USER.get()['id'],last_id));con.commit()
+    return {'ok':True}
+
+
+def family_new_items(kind='',limit=20):
+    """«Новое в семье»: свежие тайтлы других участников, которых нет в моей библиотеке."""
+    me=AUTH_USER.get()['id']
+    with cache_db() as con:
+        rows=con.execute("""select t.path,t.created_at,a.login from title_owners t join accounts a on a.id=t.user_id
+            where t.user_id!=? and t.path not in (select path from account_library where user_id=?) order by t.created_at desc limit 200""",(me,me)).fetchall()
+        cards=family_title_rows(con,[r['path'] for r in rows])
+    out=[]
+    for r in rows:
+        c=cards.get(r['path'])
+        if not c or (kind and c['kind']!=kind):continue
+        item=row_media(c,c['kind']);item.update({'owner':r['login'],'inMyLibrary':False,'inLibrary':True,'hasFile':True,'path':r['path']})
+        out.append(item)
+        if len(out)>=limit:break
+    return out
+
+
+@app.get('/api/family/new')
+def family_new(kind:str=Query(''),limit:int=Query(20,ge=1,le=60)):
+    """Ряд «Новое в семье» для веба и приложения."""
+    return family_new_items(kind,limit)
+
+
+@app.post('/api/auth/activity')
+def auth_set_activity(show:int=Form(...)):
+    """Показывать ли семье, что я сейчас смотрю."""
+    with cache_db() as con:
+        con.execute('update accounts set show_activity=? where id=?',(1 if show else 0,AUTH_USER.get()['id']));con.commit()
+    return {'ok':True,'showActivity':bool(show)}
+
+
+# --- 22.30 Друзья: другой MediaHub -------------------------------------------------
+# Хабы дружат парой: общий секрет создаёт тот, кого добавили по коду. Каждый запрос
+# сервер↔сервер подписан HMAC (метод, путь, время, одноразовый nonce, адрес отправителя):
+# секрет по сети не ходит, повтор запроса отклоняется, адрес у друга обновляется сам.
+FED_NONCES={}
+FED_ATTEMPTS={}
+
+
+def fed_meta(con,key,make=None):
+    """Значение из meta; если его нет и задан make — создать и сохранить."""
+    row=con.execute('select value from meta where key=?',(key,)).fetchone()
+    if row and row['value']:return row['value']
+    if make is None:return ''
+    value=make();con.execute('insert or replace into meta(key,value) values(?,?)',(key,value));con.commit();return value
+
+
+def fed_new_code():
+    """Код друга: 12 знаков без похожих букв и цифр, MH-XXXX-XXXX-XXXX (~60 бит)."""
+    raw=''.join(secrets.choice('ABCDEFGHJKLMNPQRSTUVWXYZ23456789') for _ in range(12))
+    return 'MH-'+'-'.join(raw[i:i+4] for i in (0,4,8))
+
+
+def fed_identity():
+    """hub_id, название и код друга этого хаба (создаются при первом обращении)."""
+    with cache_db() as con:
+        return {'hubId':fed_meta(con,'hub_id',lambda:secrets.token_hex(16)),'code':fed_meta(con,'friend_code',fed_new_code),'name':fed_meta(con,'hub_name') or 'MediaHub'}
+
+
+def fed_my_address():
+    """Внешний адрес, который получают друзья: выбранный в «Друзьях» или первый внешний."""
+    ext=auth_external_addresses()
+    with cache_db() as con:chosen=fed_meta(con,'friend_address')
+    return chosen if chosen in ext else (ext[0] if ext else chosen)
+
+
+def fed_sign(secret,method,path,stamp,nonce,address=''):
+    """HMAC-SHA256 подписи запроса между хабами."""
+    return hmac.new(secret.encode(),f'{method.upper()}\n{path}\n{stamp}\n{nonce}\n{address}'.encode(),hashlib.sha256).hexdigest()
+
+
+def fed_seen_nonce(key):
+    """True, если такой nonce уже был за последние 15 минут (повтор запроса)."""
+    now=time.time()
+    for k,t in list(FED_NONCES.items()):
+        if now-t>900:FED_NONCES.pop(k,None)
+    if key in FED_NONCES:return True
+    FED_NONCES[key]=now;return False
+
+
+def fed_friend(con,hub_id):
+    """Друг по hub_id или 404."""
+    row=con.execute('select * from friend_hubs where hub_id=?',(hub_id,)).fetchone()
+    if not row:raise HTTPException(404,'Такого друга нет')
+    return dict(row)
+
+
+def fed_verify(request):
+    """Проверить подпись входящего запроса друга; адрес друга обновить, если он сменился."""
+    h=request.headers;hub=h.get('x-mh-hub','');stamp=h.get('x-mh-time','');nonce=h.get('x-mh-nonce','');address=h.get('x-mh-address','')
+    with cache_db() as con:row=con.execute('select * from friend_hubs where hub_id=?',(hub,)).fetchone()
+    path=request.url.path+(('?'+request.url.query) if request.url.query else '')
+    if (not row or not stamp.isdigit() or abs(time.time()-int(stamp))>300 or not 16<=len(nonce)<=64
+            or not hmac.compare_digest(h.get('x-mh-sign',''),fed_sign(row['secret'],request.method,path,stamp,nonce,address))
+            or fed_seen_nonce('in:'+hub+':'+nonce)):
+        raise HTTPException(401,'Неверная подпись друга')
+    friend=dict(row)
+    try:address=auth_normalize_address(address) if address else ''
+    except HTTPException:address=''
+    with cache_db() as con:
+        con.execute('update friend_hubs set last_seen=?,last_error=? ,address=? where hub_id=?',(time.time(),'',address or friend['address'],hub));con.commit()
+    return friend
+
+
+def fed_headers(friend,method,path):
+    """Заголовки подписанного запроса к другу (новый nonce на каждый запрос)."""
+    me=fed_identity();stamp=str(int(time.time()));nonce=secrets.token_hex(16);address=fed_my_address()
+    return {'X-MH-Hub':me['hubId'],'X-MH-Time':stamp,'X-MH-Nonce':nonce,'X-MH-Address':address,
+            'X-MH-Sign':fed_sign(friend['secret'],method,path,stamp,nonce,address)}
+
+
+async def fed_call(friend,method,path,data=None,timeout=12.0):
+    """Подписанный запрос к другу. Ошибки — понятным текстом и в last_error."""
+    headers=fed_headers(friend,method,path)
+    error=''
+    try:
+        async with httpx.AsyncClient(timeout=timeout,trust_env=False) as c:
+            r=await c.request(method,friend['address'].rstrip('/')+path,headers=headers,data=data)
+        if r.status_code==401:error='друг не узнал подпись — возможно, он удалил дружбу'
+        elif r.status_code>=400:error=f'друг ответил HTTP {r.status_code}'
+        else:
+            with cache_db() as con:con.execute("update friend_hubs set last_seen=?,last_error='' where hub_id=?",(time.time(),friend['hub_id']));con.commit()
+            return r.json()
+    except (httpx.ConnectError,httpx.ConnectTimeout):error='хаб друга не отвечает — он выключен, порт закрыт или адрес неверный'
+    except httpx.HTTPError as e:error=f'нет связи с хабом друга: {type(e).__name__}'
+    except ValueError:error='по адресу друга ответил не MediaHub'
+    with cache_db() as con:con.execute('update friend_hubs set last_error=? where hub_id=?',(error,friend['hub_id']));con.commit()
+    raise HTTPException(502,'Друг «'+friend['name']+'»: '+error)
+
+
+def fed_public_friend(row):
+    """Описание друга для интерфейса (без секрета)."""
+    seen=row['last_seen'] or 0
+    return {'hubId':row['hub_id'],'name':row['name'],'address':row['address'],'online':time.time()-seen<900,'lastSeen':seen,'lastError':row['last_error'] or '','since':row['created_at']}
+
+
+def fed_library_items(kind=''):
+    """Что видят друзья: вся семейная библиотека, кроме скрытого. Пути и логины семьи наружу не уходят."""
+    with cache_db() as con:
+        hidden={r['path'] for r in con.execute('select path from friend_hidden')}
+        owners=[r for r in con.execute('select path,created_at from title_owners order by created_at desc') if r['path'] not in hidden]
+        cards=family_title_rows(con,[r['path'] for r in owners])
+    out=[]
+    for r in owners:
+        c=cards.get(r['path'])
+        if not c or (kind and c['kind']!=kind):continue
+        m=row_media(c,c['kind']);poster=str(m.get('poster') or '')
+        out.append({'id':hashlib.sha256(r['path'].encode()).hexdigest()[:24],'title':m.get('title') or '','year':str(m.get('year') or ''),'kind':c['kind'],
+                    'overview':str(m.get('overview') or '')[:600],'poster':poster if poster.startswith(('http://','https://')) else '',
+                    'genres':m.get('genres') or [],'externalId':str(m.get('externalId') or ''),'catalog':m.get('catalog') or '','addedAt':r['created_at']})
+    return out
+
+
+@app.get('/api/friends')
+def friends_list():
+    """Друзья хаба; администратору — ещё «Мои данные для друга»."""
+    user=AUTH_USER.get()
+    with cache_db() as con:rows=con.execute('select * from friend_hubs order by name').fetchall()
+    out={'items':[fed_public_friend(r) for r in rows]}
+    if user and user['is_admin']:
+        me=fed_identity();out['me']={**me,'address':fed_my_address(),'addresses':auth_external_addresses()}
+    return out
+
+
+@app.post('/api/friends/me')
+def friends_me(name:str=Form(''),address:str=Form(''),new_code:int=Form(0)):
+    """Название хаба для друзей, адрес для друзей, новый код (старый перестаёт работать, друзья остаются)."""
+    with cache_db() as con:
+        if name.strip():con.execute("insert or replace into meta(key,value) values('hub_name',?)",(" ".join(name.split())[:60],))
+        if address.strip():con.execute("insert or replace into meta(key,value) values('friend_address',?)",(auth_normalize_address(address),))
+        if new_code:con.execute("insert or replace into meta(key,value) values('friend_code',?)",(fed_new_code(),))
+        con.commit()
+    return friends_list()
+
+
+@app.post('/api/friends/add')
+async def friends_add(address:str=Form(...),code:str=Form(...),my_address:str=Form('')):
+    """Добавить друга по его адресу и коду; друг сам проверит наш адрес и пропишет нас у себя."""
+    target=auth_normalize_address(address);mine=auth_normalize_address(my_address) if my_address.strip() else fed_my_address()
+    if not mine:raise HTTPException(400,'Сначала впишите внешний адрес своего хаба в «Адреса подключения»: по нему друг будет к вам подключаться')
+    me=fed_identity()
+    nonce=secrets.token_hex(16);FED_NONCES['out:'+nonce]=time.time()
+    try:
+        async with httpx.AsyncClient(timeout=20,trust_env=False) as c:
+            r=await c.post(target+'/api/federation/hello',data={'code':code.strip().upper(),'hub_id':me['hubId'],'name':me['name'],'address':mine,'nonce':nonce,'protocol':'1'})
+    except (httpx.ConnectError,httpx.ConnectTimeout):raise HTTPException(502,'Хаб друга не отвечает — проверьте адрес и проброс порта у друга')
+    except httpx.HTTPError as e:raise HTTPException(502,f'Нет связи с хабом друга: {type(e).__name__}')
+    try:answer=r.json()
+    except ValueError:raise HTTPException(502,'По этому адресу не MediaHub')
+    if r.status_code>=400:raise HTTPException(400,str(answer.get('detail') or f'Хаб друга ответил HTTP {r.status_code}'))
+    if not answer.get('hubId') or not answer.get('secret'):raise HTTPException(502,'Хаб друга слишком старый: обновите его до 22.30')
+    with cache_db() as con:
+        con.execute('insert or replace into friend_hubs(hub_id,name,address,secret,status,created_at,last_seen,last_error) values(?,?,?,?,?,?,?,?)',
+                    (answer['hubId'],str(answer.get('name') or 'MediaHub')[:60],target,answer['secret'],'active',time.time(),time.time(),''));con.commit()
+    return {'ok':True,'friend':{'hubId':answer['hubId'],'name':answer.get('name')}}
+
+
+@app.post('/api/friends/remove')
+async def friends_remove(hub_id:str=Form(...)):
+    """Удалить дружбу у себя и сообщить другу: доступ пропадает сразу."""
+    with cache_db() as con:friend=fed_friend(con,hub_id)
+    try:await fed_call(friend,'POST','/api/federation/remove',timeout=6)
+    except HTTPException:pass
+    with cache_db() as con:con.execute('delete from friend_hubs where hub_id=?',(hub_id,));con.commit()
+    return {'ok':True}
+
+
+@app.post('/api/friends/check')
+async def friends_check(hub_id:str=Form(...)):
+    """Проверить связь с другом; заодно обновить его название."""
+    with cache_db() as con:friend=fed_friend(con,hub_id)
+    info=await fed_call(friend,'GET','/api/federation/ping',timeout=8)
+    with cache_db() as con:
+        con.execute('update friend_hubs set name=? where hub_id=?',(str(info.get('name') or friend['name'])[:60],hub_id));con.commit()
+        row=con.execute('select * from friend_hubs where hub_id=?',(hub_id,)).fetchone()
+    return fed_public_friend(row)
+
+
+@app.get('/api/friends/{hub_id}/library')
+async def friends_library(hub_id:str,kind:str=Query('',pattern='^(|movies|tv|anime)$')):
+    """Полка друга. Что уже есть у нас, помечено haveIt."""
+    with cache_db() as con:friend=fed_friend(con,hub_id)
+    items=await fed_call(friend,'GET','/api/federation/library'+(f'?kind={kind}' if kind else ''))
+    return await asyncio.to_thread(fed_mark_have,items,friend)
+
+
+def fed_mark_have(items,friend):
+    """Подписать тайтлы друга: чей он и есть ли уже у нас (haveIt)."""
+    with cache_db() as con:rows=con.execute("select kind,title,year,external_id from library_cache where coalesce(path,'')!='' and has_file=1").fetchall()
+    ids={(r['kind'],str(r['external_id'] or '')) for r in rows if r['external_id']}
+    names={(r['kind'],family_title_key(r['title']),str(r['year'] or '')[:4]) for r in rows}
+    for x in items:
+        x['friend']=friend['name'];x['friendHub']=friend['hub_id']
+        x['haveIt']=(x['kind'],x.get('externalId') or '') in ids or (x['kind'],family_title_key(x['title']),str(x['year'])[:4]) in names
+    return items
+
+
+FED_NEW={}
+
+
+@app.get('/api/friends/new')
+async def friends_new(limit:int=Query(20,ge=1,le=60),days:int=Query(30,ge=1,le=365)):
+    """«Новое у друзей» для главной: свежие тайтлы со всех полок, которых у нас ещё нет.
+    Полка друга кэшируется на 10 минут — главная не ждёт выключенный хаб."""
+    with cache_db() as con:friends=[dict(r) for r in con.execute('select * from friend_hubs')]
+    async def shelf(f):
+        hit=FED_NEW.get(f['hub_id'])
+        if hit and time.time()-hit[0]<600:return f,hit[1]
+        try:items=await fed_call(f,'GET','/api/federation/library',timeout=6)
+        except HTTPException:items=hit[1] if hit else []
+        FED_NEW[f['hub_id']]=(time.time(),items)
+        return f,items
+    out=[];since=time.time()-days*86400
+    for f,items in await asyncio.gather(*(shelf(f) for f in friends)):
+        fresh=[dict(x) for x in items if float(x.get('addedAt') or 0)>=since]
+        out+=await asyncio.to_thread(fed_mark_have,fresh,f)
+    out=[x for x in out if not x['haveIt']]
+    out.sort(key=lambda x:-float(x.get('addedAt') or 0))
+    return out[:limit]
+
+
+@app.post('/api/friends/hide')
+def friends_hide(path:str=Form(...),hidden:int=Form(1)):
+    """Скрыть тайтл от друзей (или показать снова) — автор или администратор."""
+    p=str(path or '').rstrip('/');family_require_edit(path=p)
+    with cache_db() as con:
+        if hidden:con.execute('insert or ignore into friend_hidden values(?,?)',(p,time.time()))
+        else:con.execute('delete from friend_hidden where path=?',(p,))
+        con.commit()
+    return {'ok':True,'hidden':bool(hidden)}
+
+
+@app.post('/api/federation/hello')
+async def federation_hello(request:Request,code:str=Form(...),hub_id:str=Form(...),name:str=Form(''),address:str=Form(...),nonce:str=Form(...),protocol:str=Form('1')):
+    """Нас добавляют в друзья: проверить код, достучаться до адреса друга, выдать общий секрет."""
+    ip=request.client.host if request.client else '';now=time.time()
+    tries=[t for t in FED_ATTEMPTS.get(ip,[]) if now-t<3600]
+    if len(tries)>=5:raise HTTPException(429,'Слишком много попыток кода. Повторите через час')
+    FED_ATTEMPTS[ip]=tries+[now]
+    me=fed_identity()
+    if not hmac.compare_digest(code.strip().upper(),me['code']):raise HTTPException(400,'Код друга неверный')
+    if hub_id==me['hubId']:raise HTTPException(400,'Нельзя добавить в друзья свой же хаб')
+    if not re.fullmatch(r'[0-9a-f]{16,64}',hub_id) or not 16<=len(nonce)<=64:raise HTTPException(400,'Неверный запрос дружбы')
+    their=auth_normalize_address(address)
+    # Проверяем, что адрес действительно ведёт к добавляющему хабу и порт у него открыт.
+    try:
+        async with httpx.AsyncClient(timeout=12,trust_env=False) as c:
+            r=await c.get(their+'/api/federation/verify',params={'nonce':nonce})
+        ok=r.status_code==200 and r.json().get('hubId')==hub_id
+    except Exception:ok=False
+    if not ok:raise HTTPException(400,f'Хаб друга не достучался до вашего адреса {their} — проверьте проброс порта и адрес')
+    FED_ATTEMPTS.pop(ip,None);secret=secrets.token_urlsafe(32)
+    with cache_db() as con:
+        con.execute('insert or replace into friend_hubs(hub_id,name,address,secret,status,created_at,last_seen,last_error) values(?,?,?,?,?,?,?,?)',
+                    (hub_id," ".join(name.split())[:60] or 'MediaHub',their,secret,'active',now,now,''));con.commit()
+    return {'hubId':me['hubId'],'name':me['name'],'address':fed_my_address(),'secret':secret,'protocol':1}
+
+
+FED_EXTRA_EXTS={'.idx','.sup','.mka','.ac3','.dts','.aac','.flac','.eac3','.m4a'}
+
+
+def fed_title_path(title_id):
+    """Путь тайтла по id полки друга; скрытое от друзей не отдаётся."""
+    with cache_db() as con:
+        hidden={r['path'] for r in con.execute('select path from friend_hidden')}
+        paths=[r['path'] for r in con.execute('select path from title_owners')]
+    for path in paths:
+        if path not in hidden and hashlib.sha256(path.encode()).hexdigest()[:24]==title_id:return Path(path)
+    raise HTTPException(404,'Тайтл не найден или скрыт от друзей')
+
+
+def fed_title_files(folder):
+    """Файлы тайтла для друга: видео, субтитры и внешние дорожки; сэмплы и ссылки пропускаются."""
+    if folder.is_file():return [(folder.name,folder)]
+    out=[]
+    for f in sorted(folder.rglob('*')):
+        if not f.is_file() or f.is_symlink() or f.suffix.lower() not in VIDEO_EXTS|SUB_EXTS|FED_EXTRA_EXTS:continue
+        if 'sample' in f.stem.lower() and f.stat().st_size<300*1024*1024:continue
+        out.append((f.relative_to(folder).as_posix(),f))
+    return out
+
+
+@app.get('/api/federation/files')
+def federation_files(request:Request,id:str=Query(...)):
+    """Состав тайтла для скачивания другом: номер, путь внутри папки, размер."""
+    fed_verify(request)
+    return {'files':[{'n':i,'rel':rel,'size':f.stat().st_size} for i,(rel,f) in enumerate(fed_title_files(fed_title_path(id)))]}
+
+
+@app.get('/api/federation/file')
+def federation_file(request:Request,id:str=Query(...),n:int=Query(...,ge=0)):
+    """Файл тайтла для друга, с докачкой (Range: bytes=N-)."""
+    fed_verify(request)
+    files=fed_title_files(fed_title_path(id))
+    if n>=len(files):raise HTTPException(404,'Нет такого файла')
+    f=files[n][1];size=f.stat().st_size;start=0
+    m=re.fullmatch(r'bytes=(\d+)-',request.headers.get('range','').strip())
+    if m:
+        start=int(m.group(1))
+        if start>=size:raise HTTPException(416,'Файл уже скачан целиком')
+    def chunks():
+        with open(f,'rb') as h:
+            h.seek(start)
+            while block:=h.read(1024*1024):yield block
+    headers={'Accept-Ranges':'bytes','Content-Length':str(size-start)}
+    if m:headers['Content-Range']=f'bytes {start}-{size-1}/{size}'
+    return StreamingResponse(chunks(),status_code=206 if m else 200,media_type='application/octet-stream',headers=headers)
+
+
+FED_JOBS={}
+FED_JOB_LOCK=asyncio.Lock()
+
+
+def fed_staging(job_id):
+    """Папка недокачанного тайтла: рядом с базой, на том же диске, что медиатека, — перенос мгновенный."""
+    return Path(CACHE_DB).parent/'friend-downloads'/str(job_id)
+
+
+def fed_job(job_id):
+    """Задание скачивания у друга."""
+    with cache_db() as con:row=con.execute('select * from friend_downloads where id=?',(job_id,)).fetchone()
+    if not row:raise HTTPException(404,'Нет такой загрузки')
+    return dict(row)
+
+
+def fed_job_update(job_id,**fields):
+    """Обновить задание; updated_at ставится сам."""
+    fields['updated_at']=time.time()
+    with cache_db() as con:
+        con.execute('update friend_downloads set '+','.join(f'{k}=?' for k in fields)+' where id=?',(*fields.values(),job_id));con.commit()
+
+
+def fed_start_job(job_id):
+    """Запустить (или продолжить после перезапуска сервера) скачивание у друга."""
+    task=FED_JOBS.get(job_id)
+    if task and not task.done():return
+    FED_JOBS[job_id]=asyncio.get_running_loop().create_task(fed_run_job(job_id))
+
+
+async def fed_run_job(job_id):
+    """Одна передача за раз: канал друга не забивается, а очередь идёт по порядку."""
+    async with FED_JOB_LOCK:
+        try:await fed_transfer(job_id)
+        except asyncio.CancelledError:raise
+        except HTTPException as e:fed_job_update(job_id,status='error',error=str(e.detail)[:300])
+        except Exception as e:fed_job_update(job_id,status='error',error=(str(e) or type(e).__name__)[:300])
+
+
+async def fed_fetch(friend,job_id,remote_id,n,target,base_done):
+    """Скачать один файл с докачкой; прогресс — раз в 2 секунды, отмена проверяется там же."""
+    path=f'/api/federation/file?id={remote_id}&n={n}';have=target.stat().st_size if target.exists() else 0
+    headers=fed_headers(friend,'GET',path)
+    if have:headers['Range']=f'bytes={have}-'
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30,read=180),trust_env=False) as c:
+        async with c.stream('GET',friend['address'].rstrip('/')+path,headers=headers) as r:
+            if r.status_code==200:have=0
+            elif r.status_code!=206:raise RuntimeError(f'друг ответил HTTP {r.status_code}')
+            written=have;last=time.time()
+            with open(target,'ab' if have else 'wb') as out:
+                async for block in r.aiter_bytes(1024*1024):
+                    out.write(block);written+=len(block)
+                    if time.time()-last>2:
+                        last=time.time()
+                        if fed_job(job_id)['status']=='cancelled':raise asyncio.CancelledError()
+                        fed_job_update(job_id,done=base_done+written)
+    return written
+
+
+async def fed_transfer(job_id):
+    """Скачать все файлы тайтла в папку ожидания, затем положить в медиатеку."""
+    job=fed_job(job_id)
+    if job['status'] in {'done','cancelled'}:return
+    with cache_db() as con:friend=fed_friend(con,job['hub_id'])
+    fed_job_update(job_id,status='downloading',error='')
+    files=(await fed_call(friend,'GET',f"/api/federation/files?id={job['remote_id']}"))['files']
+    if not files:raise RuntimeError('у друга в этом тайтле нет видеофайлов')
+    fed_job_update(job_id,total=sum(int(f['size']) for f in files))
+    stage=fed_staging(job_id);stage.mkdir(parents=True,exist_ok=True);done=0
+    for f in files:
+        rel=str(f['rel']).replace('\\','/')
+        if rel.startswith('/') or '..' in rel.split('/'):raise RuntimeError('друг прислал неверный путь файла')
+        target=stage/rel;target.parent.mkdir(parents=True,exist_ok=True)
+        if not target.exists() or target.stat().st_size<int(f['size']):await fed_fetch(friend,job_id,job['remote_id'],f['n'],target,done)
+        done+=int(f['size']);fed_job_update(job_id,done=done)
+    await asyncio.to_thread(fed_finish,job_id)
+
+
+def fed_finish(job_id):
+    """Готовое — в медиатеку «Название (Год)»: автор — кто нажал, событие для семьи."""
+    job=fed_job(job_id);kind=job['kind'];base={'movies':MOVIES_ROOT,'tv':TV_ROOT,'anime':ANIME_ROOT}[kind]
+    name=re.sub(r'[\\/:*?"<>|]+',' ',job['title']).strip(' .') or 'Тайтл от друга'
+    if job['year'] and f"({job['year']})" not in name:name+=f" ({job['year']})"
+    dest=base/name;i=1
+    while dest.exists():i+=1;dest=base/(f'{name} — от друга' if i==2 else f'{name} — от друга {i-1}')
+    base.mkdir(parents=True,exist_ok=True);shutil.move(str(fed_staging(job_id)),str(dest))
+    meta=json.loads(job['meta'] or '{}');now=time.time()
+    with cache_db() as con:
+        save_manual_meta(con,str(dest),kind,job['title'],job['year'] or '',meta.get('poster',''),meta.get('overview',''))
+        con.execute('insert or ignore into title_owners values(?,?,?)',(str(dest),job['user_id'],now))
+        con.execute("insert or ignore into account_library values(?,?,?,'own')",(job['user_id'],str(dest),now))
+        con.execute("insert into family_events(user_id,type,path,title,kind,created_at) values(?,'added',?,?,?,?)",(job['user_id'],str(dest),job['title'],kind,now))
+        con.commit()
+    try:upsert_live_library_item(kind,str(dest),job['title'])
+    except Exception:pass
+    reset_fs_scan_cache()
+    fed_job_update(job_id,status='done',dest=str(dest),done=job['total'])
+    try:log_activity('friend-download',job['title'],f'От друга → {dest}',True)
+    except Exception:pass
+    return dest
+
+
+@app.post('/api/friends/{hub_id}/download')
+async def friends_download(hub_id:str,id:str=Form(...),kind:str=Form(...),title:str=Form(...),year:str=Form(''),poster:str=Form(''),overview:str=Form('')):
+    """«Скачать к себе»: тайтл с полки друга едет в нашу медиатеку, автор — тот, кто нажал."""
+    if kind not in {'movies','tv','anime'}:raise HTTPException(400,'Неизвестный раздел')
+    if not re.fullmatch(r'[0-9a-f]{24}',id):raise HTTPException(400,'Неверный тайтл')
+    with cache_db() as con:
+        fed_friend(con,hub_id)
+        same=con.execute("select id from friend_downloads where hub_id=? and remote_id=? and status in ('queued','downloading')",(hub_id,id)).fetchone()
+        if same:return {'ok':True,'id':same['id']}
+        now=time.time();cur=con.execute('insert into friend_downloads(hub_id,remote_id,kind,title,year,user_id,status,total,done,error,dest,meta,created_at,updated_at) values(?,?,?,?,?,?,?,0,0,?,?,?,?,?)',
+            (hub_id,id,kind," ".join(title.split())[:200],str(year)[:4],AUTH_USER.get()['id'],'queued','','',json.dumps({'poster':poster if poster.startswith(('http://','https://')) else '','overview':overview[:2000]}),now,now))
+        con.commit();job_id=cur.lastrowid
+    fed_start_job(job_id)
+    return {'ok':True,'id':job_id}
+
+
+@app.get('/api/friends/downloads')
+def friends_downloads():
+    """Скачивания у друзей: свои (админу — все). Прерванные перезапуском сервера продолжаются."""
+    user=AUTH_USER.get()
+    with cache_db() as con:
+        rows=con.execute('select d.*,f.name friend,a.login from friend_downloads d left join friend_hubs f on f.hub_id=d.hub_id left join accounts a on a.id=d.user_id where ? or d.user_id=? order by d.id desc limit 50',
+                         (1 if user['is_admin'] else 0,user['id'])).fetchall()
+    for r in rows:
+        if r['status'] in {'queued','downloading'}:fed_start_job(r['id'])
+    return {'items':[{'id':r['id'],'title':r['title'],'year':r['year'],'kind':r['kind'],'friend':r['friend'] or 'друг удалён','login':r['login'],'status':r['status'],
+                      'total':r['total'],'done':r['done'],'error':r['error'] or '','dest':r['dest'] or ''} for r in rows]}
+
+
+@app.post('/api/friends/downloads/{job_id}/cancel')
+def friends_download_cancel(job_id:int):
+    """Отменить скачивание у друга: недокачанное удаляется."""
+    job=fed_job(job_id);user=AUTH_USER.get()
+    if job['user_id']!=user['id'] and not user['is_admin']:raise HTTPException(403,'Это чужая загрузка')
+    if job['status']=='done':raise HTTPException(400,'Уже скачано')
+    fed_job_update(job_id,status='cancelled')
+    task=FED_JOBS.pop(job_id,None)
+    if task:task.cancel()
+    shutil.rmtree(fed_staging(job_id),ignore_errors=True)
+    return {'ok':True}
+
+
+@app.get('/api/federation/verify')
+def federation_verify(nonce:str=Query(...)):
+    """Ответ на проверку адреса: да, это мы сейчас добавляем друга (nonce живёт 10 минут)."""
+    at=FED_NONCES.get('out:'+nonce)
+    if not at or time.time()-at>600:raise HTTPException(404,'Нет такой заявки')
+    return {'hubId':fed_identity()['hubId'],'nonce':nonce}
+
+
+@app.get('/api/federation/ping')
+def federation_ping(request:Request):
+    """Друг проверяет связь."""
+    fed_verify(request);me=fed_identity()
+    return {'hubId':me['hubId'],'name':me['name']}
+
+
+@app.get('/api/federation/library')
+def federation_library(request:Request,kind:str=Query('')):
+    """Полка этого хаба для друга."""
+    fed_verify(request)
+    return fed_library_items(kind if kind in {'movies','tv','anime'} else '')
+
+
+@app.post('/api/federation/remove')
+def federation_remove(request:Request):
+    """Друг удалил дружбу — убираем и у себя."""
+    friend=fed_verify(request)
+    with cache_db() as con:con.execute('delete from friend_hubs where hub_id=?',(friend['hub_id'],));con.commit()
+    return {'ok':True}
+
+
+FAMILY_SIZES={'at':0.0,'sizes':{}}
+
+
+def family_folder_size(path):
+    """Размер тайтла на диске (обход папки)."""
+    p=Path(path)
+    if p.is_file():return p.stat().st_size
+    total=0
+    for root,_,files in os.walk(p):
+        for name in files:
+            try:total+=os.path.getsize(os.path.join(root,name))
+            except OSError:pass
+    return total
+
+
+@app.get('/api/family/summary')
+async def family_summary(refresh:int=Query(0)):
+    """Администратору: сколько тайтлов и места у каждого участника и тайтлы, которых нет ни в чьей библиотеке."""
+    def build():
+        with cache_db() as con:
+            owners=con.execute('select t.path,t.user_id,a.login from title_owners t join accounts a on a.id=t.user_id').fetchall()
+            users=con.execute('select * from accounts order by is_admin desc,login').fetchall()
+            libs={r['user_id']:r['n'] for r in con.execute('select user_id,count(*) n from account_library group by user_id')}
+            held={r['path'] for r in con.execute('select distinct path from account_library')}
+            cards=family_title_rows(con,[r['path'] for r in owners if r['path'] not in held])
+        # Обход диска дорогой — размеры держим 10 минут.
+        if refresh or time.time()-FAMILY_SIZES['at']>600:
+            FAMILY_SIZES['sizes']={r['path']:family_folder_size(r['path']) for r in owners};FAMILY_SIZES['at']=time.time()
+        sizes=FAMILY_SIZES['sizes']
+        per={u['id']:{**auth_public(u),'uploaded':0,'bytes':0,'library':libs.get(u['id'],0)} for u in users}
+        for r in owners:
+            if r['user_id'] in per:per[r['user_id']]['uploaded']+=1;per[r['user_id']]['bytes']+=sizes.get(r['path'],0)
+        orphans=[{'path':r['path'],'owner':r['login'],'title':(cards[r['path']]['title'] if r['path'] in cards else Path(r['path']).name),
+                  'kind':(cards[r['path']]['kind'] if r['path'] in cards else ''),'bytes':sizes.get(r['path'],0)} for r in owners if r['path'] not in held]
+        return {'users':list(per.values()),'orphans':sorted(orphans,key=lambda x:-x['bytes']),'measuredAt':FAMILY_SIZES['at']}
+    return await asyncio.to_thread(build)
+
+
+@app.post('/api/family/owner')
+def family_set_owner(path:str=Form(...),login:str=Form(...)):
+    """Сменить автора тайтла (администратор): новый автор правит его и получает в свою библиотеку."""
+    p=str(path or '').rstrip('/')
+    with cache_db() as con:
+        user=con.execute('select id from accounts where login=?',(login.strip().casefold(),)).fetchone()
+        if not user:raise HTTPException(404,'Нет такого участника')
+        if not con.execute('update title_owners set user_id=? where path=?',(user['id'],p)).rowcount:raise HTTPException(404,'Тайтл не найден')
+        con.execute("insert or ignore into account_library values(?,?,?,'own')",(user['id'],p,time.time()));con.commit()
+    return {'ok':True}
+
+
+@app.get('/api/family')
+def family_members():
+    """Участники семьи: аватарка, сколько тайтлов в библиотеке и сколько загрузили сами."""
+    with cache_db() as con:
+        users=con.execute('select * from accounts order by is_admin desc,login').fetchall()
+        counts={r['user_id']:r['n'] for r in con.execute('select user_id,count(*) n from account_library group by user_id')}
+        own={r['user_id']:r['n'] for r in con.execute('select user_id,count(*) n from title_owners group by user_id')}
+    return {'items':[{**auth_public(u),'library':counts.get(u['id'],0),'uploaded':own.get(u['id'],0)} for u in users]}
+
+
 @app.get("/api/library-cached")
-async def library_cached(kind:str=Query("movies")):
+async def library_cached(kind:str=Query("movies"),scope:str=Query("mine",pattern="^(mine|family)$"),owner:str=Query("")):
+    """Библиотека раздела: моя (по умолчанию), вся семья (scope=family) или участника (owner=логин).
+    Первыми идут карточки того, что ещё скачивается, — с прогрессом."""
+    items=await library_cached_all(kind)
+    torrents=await family_torrents()
+    def build():
+        view=family_view(kind,items,scope,owner)
+        return family_with_downloads(view,family_download_cards(kind,torrents,scope,owner))
+    return await asyncio.to_thread(build)
+
+
+async def library_cached_all(kind):
+    """Все тайтлы раздела в хранилище, без деления по аккаунтам."""
     if kind not in {"movies","tv","anime"}:
         raise HTTPException(400,"Неизвестный раздел библиотеки")
     with cache_db() as con:
@@ -4366,6 +5412,7 @@ async def library_attach_page(url:str=Form(...),kind:str=Form("movies"),
     Полезно, когда TMDB не знает тайтл: пользователь даёт ссылку на страницу
     сайта, а MediaHub забирает оттуда название, год, постер и описание.
     """
+    family_require_edit(kind,item_key,path)
     url=(url or "").strip()
     if not url.lower().startswith(("http://","https://")):
         raise HTTPException(400,"Нужна ссылка http или https")
@@ -4398,6 +5445,7 @@ async def library_manual_meta(kind:str=Form("movies"),item_key:str=Form(""),path
 
     Сохраняется так же, как данные со страницы: только введённое, без TMDB.
     """
+    family_require_edit(kind,item_key,path)
     if kind not in {"movies","tv","anime"}:
         raise HTTPException(400,"Неизвестный раздел")
     new_title=" ".join(str(new_title or "").split())
@@ -4432,6 +5480,7 @@ async def library_rename(new_title:str=Form(...),kind:str=Form("movies"),
     Папку у тайтлов, которыми управляют Radarr или Sonarr, не трогаем — иначе
     ARR потеряет связь со своей библиотекой и начнёт качать заново.
     """
+    family_require_edit(kind,item_key,path)
     new_title=" ".join(str(new_title or "").split())
     if not new_title:
         raise HTTPException(400,"Пустое название")
@@ -4492,6 +5541,7 @@ async def library_rename(new_title:str=Form(...),kind:str=Form("movies"),
             con.execute("delete from manual_meta where path=?",(old_path,))
             con.execute("update download_jobs set final_path=? where final_path=?",(new_path,old_path))
             move_collection_item(con,old_path,new_path)
+            family_move(con,old_path,new_path)
         con.commit()
     # Скан медиатеки закэширован — сбрасываем, чтобы список обновился сразу.
     set_setting(f"fs_scan_{kind}","")
@@ -4663,6 +5713,7 @@ async def library_merge(kind:str=Form("anime"),
     Сериал получает подпапку «Season NN», фильм — просто дополнительные файлы.
     Карточка остаётся у основного проекта, вторая убирается.
     """
+    family_require_edit(kind,source_key,source_path);family_require_edit(kind,target_key,target_path)
     if kind not in {"movies","tv","anime"}:
         raise HTTPException(400,"Неизвестный раздел")
     src_row=find_library_row(kind,source_key,source_path,source_title) or {}
@@ -4743,6 +5794,8 @@ async def library_merge(kind:str=Form("anime"),
         con.execute("update download_jobs set final_path=? where final_path=?",(str(dest),src_path))
         # Присоединённого проекта больше нет — в коллекции остаётся основной.
         move_collection_item(con,src_path,None)
+        # Кто держал присоединённый проект, получает основной.
+        family_move(con,src_path,dst_path)
         con.commit()
     forget_media_path(src_path)
     reset_fs_scan_cache()
@@ -5267,6 +6320,7 @@ def player_stream_args(binary,f,probe,start,audio,quality,bitrate=0):
 @app.post("/api/library/file-rename")
 async def library_file_rename(path:str=Form(...),new_name:str=Form(...)):
     """Переименовать файл проекта вместе с одноимёнными субтитрами и дорожками."""
+    family_require_edit(path=path)
     f=_check_project_file(path)
     name=" ".join(str(new_name or "").split())
     if not name:
@@ -5298,6 +6352,7 @@ async def library_file_rename(path:str=Form(...),new_name:str=Form(...)):
 @app.post("/api/library/file-move")
 async def library_file_move(path:str=Form(...),season:int=Form(...)):
     """Переложить серию в «Season NN» своего проекта — если она попала не в тот сезон."""
+    family_require_edit(path=path)
     f=_check_project_file(path)
     if not 0<=int(season)<=200:
         raise HTTPException(400,"Номер сезона — от 0 до 200")
@@ -5475,10 +6530,10 @@ async def tracking_remove(kind:str,item_key:str,delete_files:bool=Query(False)):
 
 
 @app.get("/api/library-search")
-async def library_search(q:str=Query(""),kind:str=Query("movies")):
+async def library_search(q:str=Query(""),kind:str=Query("movies"),scope:str=Query("mine",pattern="^(mine|family)$")):
     if kind not in {"movies","tv","anime"}:
         raise HTTPException(400,"Неизвестный раздел библиотеки")
-    items=await library_cached(kind)
+    items=await asyncio.to_thread(family_view,kind,await library_cached_all(kind),scope,"")
     needle=normalize_search_text(q)
     if not needle:
         return items
@@ -6659,7 +7714,8 @@ def _library_state_from_rows(kind,card,rows):
 
 
 def library_state_for_card(kind, card):
-    return _library_state_from_rows(kind,card,_library_rows(kind))
+    state=_library_state_from_rows(kind,card,_library_rows(kind))
+    return family_annotate([state])[0] if state.get("inLibrary") else state
 
 
 def annotate_library_items(items,kind):
@@ -6667,7 +7723,7 @@ def annotate_library_items(items,kind):
     for x in items or []:
         try:x.update(_library_state_from_rows(kind,x,rows))
         except Exception:pass
-    return items
+    return family_annotate(items)
 
 
 def annotate_home_library(sections):
@@ -7430,11 +8486,11 @@ async def notes_delete(note_id:int):
 
 @app.get("/api/favorites")
 async def favorites(kind:str|None=None):
+    """Избранное своего аккаунта."""
+    me=AUTH_USER.get()['id'] if AUTH_USER.get() else 0
     with cache_db() as con:
-        if kind:
-            rows=con.execute("select * from favorites where kind=? order by created_at desc",(kind,)).fetchall()
-        else:
-            rows=con.execute("select * from favorites order by created_at desc").fetchall()
+        rows=con.execute("""select f.* from favorites f join account_favorites a on a.fav_key=f.fav_key
+            where a.user_id=? and (? is null or f.kind=?) order by a.created_at desc""",(me,kind,kind)).fetchall()
     out=[]
     for r in rows:
         d=dict(r)
@@ -7469,13 +8525,16 @@ async def favorite_add(
         (fav_key,kind,external_id,title,year,overview,poster,genres,rating,
          runtime,status,studio,network,catalog,raw_json,
          datetime.now(timezone.utc).isoformat()))
+        con.execute("insert or ignore into account_favorites values(?,?,?)",(AUTH_USER.get()['id'],fav_key,datetime.now(timezone.utc).isoformat()))
         con.commit()
     return {"ok":True,"favKey":fav_key,"message":"Добавлено в избранное"}
 
 @app.delete("/api/favorites/{fav_key}")
 async def favorite_delete(fav_key:str):
+    """Убрать из своего избранного; данные тайтла удаляются, когда он больше ни у кого не в избранном."""
     with cache_db() as con:
-        con.execute("delete from favorites where fav_key=?",(fav_key,))
+        con.execute("delete from account_favorites where user_id=? and fav_key=?",(AUTH_USER.get()['id'],fav_key))
+        con.execute("delete from favorites where fav_key=? and not exists(select 1 from account_favorites where fav_key=?)",(fav_key,fav_key))
         con.commit()
     return {"ok":True,"message":"Удалено из избранного"}
 
@@ -7517,6 +8576,7 @@ async def series_download(
     seasons:str=Form(""), all_missing:bool=Form(False), year:str=Form("")
 ):
     if kind not in {"tv","anime"}:raise HTTPException(400,"Только сериалы и аниме")
+    family_claim(kind,external_id,title)
     try:series,created=await _ensure_sonarr_series(kind,external_id,catalog,title,year)
     except Exception as e:return JSONResponse({"ok":False,"error":str(e)},status_code=400)
     sid=series.get("id")
@@ -7569,6 +8629,7 @@ async def movie_collection_download(collection_id:int=Form(...)):
             item=lookup[0]
             item.update({"qualityProfileId":profile,"rootFolderPath":str(MOVIES_ROOT),"monitored":True,"minimumAvailability":"released","addOptions":{"searchForMovie":True}})
             await post_json(RADARR_URL,RADARR_KEY,"/api/v3/movie",item);added.append(part.get("title") or str(mid))
+            family_claim("movies",mid,part.get("title"))
         except Exception as e:errors.append({"title":part.get("title") or str(mid),"error":str(e)})
     log_activity("collection",collection.get("name") or "Коллекция",f"Добавлено {len(added)}, уже было {len(skipped)}",not errors)
     return {"ok":not bool(errors),"message":f"Коллекция: добавлено {len(added)}, уже есть {len(skipped)}","added":added,"skipped":skipped,"errors":errors}
@@ -7592,6 +8653,63 @@ async def _find_new_torrent(before,want_hash="",tries=6,delay=1.0):
             h=str(x.get("hash") or "").lower()
             if (want_hash and h==want_hash) or (h and h not in before):
                 return x
+    return None
+
+def _release_cache_expired(error_text):
+    """Prowlarr забыл релиз: его кэш живёт около получаса, а наш список дольше."""
+    t=(error_text or "").casefold()
+    return "in cache" in t or "try searching again" in t
+
+
+def _release_queries(title):
+    """Варианты запроса, по которым индексер снова найдёт тот же релиз."""
+    title=re.sub(r"\s+"," ",title or "").strip()
+    out=[title]
+    plain=re.sub(r"\s+"," ",re.sub(r"[\[\(\{][^\]\)\}]*[\]\)\}]"," ",title)).strip(" /-")
+    if plain:out.append(plain)
+    year=re.search(r"\b(19|20)\d{2}\b",title)
+    names=[x.strip() for x in re.split(r"\s/\s|\(",title.split("[")[0]) if x.strip()]
+    for name in names[:2]:
+        name=re.sub(r"\b(19|20)\d{2}\b.*$","",name).strip(" /-")
+        if len(name)>=2:out.append(f"{name} {year.group(0)}" if year else name)
+    seen=set();res=[]
+    for q in out:
+        k=q.casefold()
+        if q and k not in seen:seen.add(k);res.append(q)
+    return res[:4]
+
+
+async def _refresh_release_payload(payload):
+    """Заново ищет релиз на том же индексере и возвращает свежую запись Prowlarr.
+
+    Нужен, когда Prowlarr отвечает «Couldn't find requested release in cache»:
+    штатный grab работает только с релизами из его недавнего поиска.
+    """
+    idx=payload.get("indexerId")
+    if not PROWLARR_KEY or idx is None:
+        return None
+    guid=str(payload.get("guid") or "")
+    info=str(payload.get("infoUrl") or "")
+    title=str(payload.get("title") or "")
+    size=int(payload.get("size") or 0)
+    def same(x):
+        if guid and str(x.get("guid") or "")==guid:return 3
+        if info and str(x.get("infoUrl") or "")==info:return 2
+        if title and str(x.get("title") or "").strip().casefold()==title.strip().casefold():
+            xs=int(x.get("size") or 0)
+            if not size or not xs or abs(xs-size)<=max(size//50,1):return 1
+        return 0
+    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0,connect=5.0),trust_env=False) as c:
+        for q in _release_queries(title):
+            try:
+                r=await c.get(PROWLARR_URL+"/api/v1/search",headers={"X-Api-Key":PROWLARR_KEY},
+                              params=[("query",q),("type","search"),("indexerIds",str(idx)),("limit","100"),("offset","0")])
+                rows=r.json() if r.status_code<300 else []
+            except Exception:
+                rows=[]
+            best=max(rows or [],key=same,default=None)
+            if best and same(best):
+                return best
     return None
 
 
@@ -7651,7 +8769,7 @@ async def _grab_release_direct(payload,category):
                 if data:
                     content=data; break
     if not magnet and not content:
-        return False,"; ".join(x for x in (direct_error,page_error,"индексер не отдал торрент и страница релиза не помогла") if x)
+        return False,"; ".join(x for x in (direct_error,page_error) if x) or "индексер не отдал торрент и страница релиза не помогла"
 
     c=await qbit_login()
     if not c:
@@ -7704,18 +8822,35 @@ async def provider_grab(
             await qclient.aclose()
 
     # First use Prowlarr's normal grab path.
-    prowlarr_error=""
-    try:
-        async with httpx.AsyncClient(timeout=45,trust_env=False) as c:
-            r=await c.post(
-                PROWLARR_URL+"/api/v1/search",
-                headers={"X-Api-Key":PROWLARR_KEY,"Content-Type":"application/json"},
-                json=row["payload"]
-            )
-        if r.status_code >= 300:
-            prowlarr_error=f"HTTP {r.status_code} {(r.text or '').strip()[:200]}"
-    except Exception as e:
-        prowlarr_error=str(e)[:200]
+    async def prowlarr_grab(payload):
+        try:
+            async with httpx.AsyncClient(timeout=45,trust_env=False) as c:
+                r=await c.post(
+                    PROWLARR_URL+"/api/v1/search",
+                    headers={"X-Api-Key":PROWLARR_KEY,"Content-Type":"application/json"},
+                    json=payload
+                )
+            if r.status_code >= 300:
+                return f"HTTP {r.status_code} {(r.text or '').strip()[:200]}"
+        except Exception as e:
+            return str(e)[:200]
+        return ""
+
+    prowlarr_error=await prowlarr_grab(row["payload"])
+    if prowlarr_error and _release_cache_expired(prowlarr_error):
+        # Список релизов у нас живёт дольше кэша Prowlarr. Ищем тот же релиз
+        # заново на том же индексере — свежая запись снова попадает в кэш
+        # Prowlarr, и у неё обновлённые ссылки на скачивание.
+        fresh=await _refresh_release_payload(row.get("payload") or {})
+        if fresh:
+            row["payload"]=fresh
+            with cache_db() as con:
+                con.execute("update search_release set payload=? where token=?",
+                            (json.dumps(fresh,ensure_ascii=False,sort_keys=True,default=str),token))
+                con.commit()
+            prowlarr_error=await prowlarr_grab(fresh)
+        else:
+            prowlarr_error="релиз больше не находится на индексере — повторите поиск"
 
     if prowlarr_error:
         # Prowlarr отдаёт 500, если индексер не смог отдать торрент по своей
@@ -7733,7 +8868,7 @@ async def provider_grab(
         if not ok:
             return JSONResponse(
                 {"ok":False,
-                 "error":f"Prowlarr не принял релиз: {prowlarr_error}",
+                 "error":_grab_error_text(prowlarr_error,row.get("payload")),
                  "details":f"Прямая загрузка тоже не удалась: {detail}"},status_code=502)
         log_activity("download-direct",media_title or row.get("title") or "",
                      f"Prowlarr: {prowlarr_error}; загружено напрямую",True)
@@ -7772,6 +8907,7 @@ async def provider_grab(
                      row.get("title") or detected.get("name") or "",category,"downloading",
                      datetime.now(timezone.utc).isoformat(),""))
                 con.commit()
+            family_mark_download(detected.get("hash"))
         log_activity("download",media_title or detected.get("name") or "Загрузка",row.get("title") or "",True)
         return {
             "ok":True,
@@ -8051,6 +9187,7 @@ def library_collection_preview(path:str=Query(...)):
 @app.post("/api/library/split-collection")
 async def library_split_collection(path:str=Form(...)):
     """Разложить уже скачанную коллекцию: каждому фильму своя папка и карточка."""
+    family_require_edit(path=path)
     src=collection_folder(path)
     parts=await asyncio.to_thread(collection_preview_parts,src)
     if not parts:raise HTTPException(400,"В папке не найдено нескольких разных фильмов — это не коллекция")
@@ -8316,9 +9453,12 @@ async def downloads():
                 meta[str(row["hash"] or "").lower()]=dict(row)
     except Exception:
         meta={}
+    owners=await asyncio.to_thread(family_download_owners);user=AUTH_USER.get()
     try:
         r=await c.get(QBIT_URL+"/api/v2/torrents/info")
+        mine=lambda x:not user or user['is_admin'] or (owners.get(str(x.get("hash") or "").lower()) or (0,))[0]==user['id']
         return {"configured":True,"items":[{
+            "owner":(owners.get(str(x.get("hash") or "").lower()) or (0,""))[1],
             "meta":meta.get(str(x.get("hash") or "").lower()) or None,
             "hash":x.get("hash"),"name":x.get("name"),"state":x.get("state"),
             "progress":round((x.get("progress") or 0)*100,1),
@@ -8326,7 +9466,7 @@ async def downloads():
             "size":x.get("size",0),"amount_left":x.get("amount_left",0),"eta":x.get("eta",0),
             "seeders":x.get("num_seeds",0),"peers":x.get("num_leechs",0),"ratio":round(float(x.get("ratio") or 0),2),
             "category":x.get("category",""),"save_path":x.get("save_path","")
-        } for x in r.json()]}
+        } for x in r.json() if mine(x)]}
     finally: await c.aclose()
 
 # --- v21.3 свой торрент ------------------------------------------------------
@@ -8702,6 +9842,43 @@ def decode_page_html(response):
         except UnicodeDecodeError:return response.content.decode("cp1251",errors="replace")
 
 
+def _page_needs_login(url,soup):
+    """Сайт показал форму входа вместо страницы релиза."""
+    from urllib.parse import urlparse
+    path=urlparse(url).path.casefold()
+    if re.search(r"(^|/)(login|signin|sign_in|takelogin|auth)(\.php|\.html?|/|$)",path):return True
+    return bool(soup.select_one('input[type="password"]'))
+
+
+def urlparse_host(url):
+    """Имя сайта без www для сообщений."""
+    from urllib.parse import urlparse
+    return (urlparse(url).hostname or url).removeprefix("www.")
+
+
+def _prowlarr_error_message(raw):
+    """Из ответа Prowlarr «HTTP 500 {json}» оставляет только сам текст ошибки."""
+    m=re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"',raw or "")
+    if not m:return (raw or "").strip()
+    try:return json.loads('"'+m.group(1)+'"')
+    except Exception:return m.group(1)
+
+
+def _grab_error_text(prowlarr_error,payload):
+    """Понятное объяснение, почему трекер не отдал торрент, и что с этим делать."""
+    indexer=str((payload or {}).get("indexer") or "трекер")
+    msg=_prowlarr_error_message(prowlarr_error)
+    low=msg.casefold()
+    if "selectors didn't match" in low or "selectors didn\u0027t match" in low:
+        return (f"{indexer} не отдал торрент: Prowlarr не нашёл кнопку «Скачать» на странице релиза. "
+                f"Обычно это значит, что вход на {indexer} в Prowlarr устарел или аккаунту пока нельзя скачивать. "
+                f"Проверьте индексер в Prowlarr (Indexers → {indexer} → Test, при необходимости заново введите логин и пароль) "
+                "или выберите раздачу с другого трекера.")
+    if "login" in low or "unauthorized" in low or "401" in low or "403" in low:
+        return f"{indexer} не пустил Prowlarr: проверьте логин и пароль трекера в Prowlarr (Indexers → {indexer} → Test)."
+    return f"Prowlarr не принял релиз: {msg[:240]}"
+
+
 async def torrent_links_from_page(url:str,return_meta=False):
     """Получить данные страницы и все доступные варианты торрентов и magnet-ссылок."""
     empty={"title":"","year":"","poster":"","overview":"","sourceUrl":url}
@@ -8721,7 +9898,10 @@ async def torrent_links_from_page(url:str,return_meta=False):
         meta=page_media_metadata(soup,html,str(response.url));meta["sourceUrl"]=url
         links,truncated=page_link_candidates(soup,html,str(response.url))
         if truncated:meta["warning"]="Показаны первые 80 ссылок; на странице есть ещё варианты"
-        if not links:meta["error"]="На странице нет открытых ссылок на торрент. Возможно, требуется вход или ссылки появляются только после выполнения JavaScript. Можно приложить свой .torrent."
+        if not links and _page_needs_login(str(response.url),soup):
+            host=urlparse_host(str(response.url))
+            meta["error"]=f"страница релиза открывается только после входа на {host}, а MediaHub на трекеры сам не входит. Скачайте .torrent на сайте и приложите его."
+        elif not links:meta["error"]="На странице нет открытых ссылок на торрент. Возможно, требуется вход или ссылки появляются только после выполнения JavaScript. Можно приложить свой .torrent."
         return (links,meta) if return_meta else (links,meta.get("title") or meta.get("error") or "")
     except Exception as error:
         return fail(f"страница недоступна: {page_fetch_error_text(error)}")
@@ -8994,6 +10174,7 @@ async def torrent_upload(
                 (detected.get("hash"),category,title,sn,detected.get("name") or title,category,
                  "downloading",datetime.now(timezone.utc).isoformat(),""))
             con.commit()
+        family_mark_download(detected.get("hash"))
     log_activity("torrent-upload",title,f"Категория: {category}"+("" if detected else " · задача пока не видна в очереди"),True)
     return {
         "ok":True,
@@ -9460,6 +10641,11 @@ async def sites_delete(site_id:int):
 
 @app.post("/api/download-action")
 async def download_action(hashes:str=Form(...),action:str=Form(...)):
+    user=AUTH_USER.get()
+    if user and not user['is_admin']:
+        owners=await asyncio.to_thread(family_download_owners)
+        if any((owners.get(h.strip().lower()) or (0,))[0]!=user['id'] for h in hashes.split('|') if h.strip()):
+            raise HTTPException(403,'Управлять можно только своими загрузками')
     c=await qbit_login()
     if not c: raise HTTPException(400,"qBittorrent не настроен")
     try:
@@ -9524,6 +10710,7 @@ async def add(
 ):
     if kind=="games":
         raise HTTPException(400,"Игры не управляются Radarr/Sonarr")
+    family_claim(kind,external_id,title)
 
     if kind=="movies":
         lookup=await get_json(

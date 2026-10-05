@@ -20,7 +20,7 @@ def load_parser():
     names = {'_blocked_fetch_host', 'clean_page_title', 'page_media_metadata',
              'page_link_candidates', 'fetch_page_resource', 'decode_page_html',
              'torrent_links_from_page', 'fetch_torrent_bytes', '_magnet_name',
-             'torrent_page_preview', 'torrent_upload', 'page_dns_failure', 'resolve_page_dns', 'PageDnsTransport', '_fetch_page_once', 'page_fetch_error_text'}
+             'torrent_page_preview', 'torrent_upload', 'page_dns_failure', 'resolve_page_dns', 'PageDnsTransport', '_fetch_page_once', 'page_fetch_error_text', '_page_needs_login', 'urlparse_host'}
     tree = ast.parse((Path(__file__).resolve().parents[1] / 'app.py').read_text(encoding='utf-8'))
     nodes = []
     for node in tree.body:

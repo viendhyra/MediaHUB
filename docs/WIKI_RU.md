@@ -254,6 +254,62 @@ GET /api/player/resume возвращает {items: [...]} с незавершё
 - Единственный Android-пакет лежит в `static/`, описание в `android.json`. Сборочный проект Android и ключи подписи ведутся отдельно.
 
 
+## Загрузки в библиотеке, «Скачалось», «Новое у друзей» (22.35)
+
+GET /api/library-cached добавляет впереди карточки незавершённых загрузок раздела: family_download_cards берёт раздачи qBittorrent (family_torrents — кэш 4 с, при молчащем qBittorrent 30 с, ожидание не больше 4 с) с download_jobs.status='downloading' этого kind, название и постер из download_meta, автора из download_owners, а также friend_downloads queued/downloading. Поля карточки: key (dl:<hash> или friend:<id>), downloading, downloadProgress (0–100), downloadLabel, downloadSource, path ''. Видимость: автор; «Вся семья» — все; owner=логин — его загрузки; админ в своей библиотеке видит ещё загрузки без автора. family_with_downloads: если тайтл уже есть (то же название, год совпадает или не задан), прогресс ставится на его карточку, отдельной нет. Веб: круг прогресса (decorateDownloads), обновление раз в 6 с без перерисовки; карточка без файлов не открывается. Приложение: MediaItem.downloading/downloadProgress/downloadLabel, DownloadOverlay на постере, тихое обновление сетки раз в 8 с; libraryItems(downloads=true) только для сетки раздела.
+
+События: family_job_events (из family_sync_all) — докачанные к имеющемуся тайтлу серии дают событие type='updated' (не чаще раза в час на тайтл; отметка meta family_jobs_at, при первом запуске прошлое не обрабатывается). /api/family/feed отдаёт mine — 10 своих последних событий: клиенты показывают «Скачалось «…» — можно смотреть», чужие — «У mari новый фильм/сериал/новое аниме «…»» и «У mari новые серии «…»».
+
+GET /api/friends/new?limit=&days=30 — свежие (addedAt за days) тайтлы со всех полок друзей, которых у нас нет (fed_mark_have), новые первыми; полка друга кэшируется на 10 минут (FED_NEW), недоступный друг не задерживает ответ дольше 6 с. Главная веба и приложения: ряд «Новое у друзей» после «Новое в семье», нажатие — «Скачать к себе».
+
+## Личное избранное, скрытие от друзей, сводка семьи (22.33)
+
+favorites — данные тайтла (общие), account_favorites(user_id,fav_key,created_at) — чьё избранное; при первом запуске всё прежнее отдано администратору (meta favorites_migrated). /api/favorites* — личные маршруты: GET своё, POST добавляет данные и свою строку, DELETE убирает свою строку и данные, если тайтл больше ни у кого не в избранном. family_view отдаёт hiddenFromFriends; POST /api/friends/hide (автор или админ). GET /api/family/summary (админ; refresh=1 — пересчитать размеры, иначе кэш 10 мин): users (uploaded, library, bytes), orphans (тайтлы без account_library ни у кого). POST /api/family/owner (админ: path, login).
+
+## Скачивание у друга (22.31)
+
+Отдача (подписанные): GET /api/federation/files?id=<24 hex> — номер, путь внутри папки, размер (видео, субтитры, внешние дорожки; сэмплы < 300 МБ и ссылки — нет); GET /api/federation/file?id=&n= — файл, Range: bytes=N- → 206. id = первые 24 hex SHA-256 пути, скрытое (friend_hidden) — 404.
+
+Получение: POST /api/friends/<hub_id>/download (id, kind, title, year, poster http(s), overview) — любой аккаунт, задание в friend_downloads (queued/downloading/done/error/cancelled, total, done). Одно задание за раз (FED_JOB_LOCK), файлы в <папка базы>/friend-downloads/<id>/, докачка по размеру уже скачанного, прогресс и проверка отмены раз в 2 с. fed_finish переносит папку в MOVIES/TV/ANIME_ROOT как «Название (Год)» (или «— от друга N»), save_manual_meta, title_owners/account_library автора, событие 'added'. GET /api/friends/downloads (свои, админу все; незавершённые после перезапуска продолжаются), POST /api/friends/downloads/<id>/cancel (автор или админ, недокачанное удаляется).
+
+## Друзья: другой MediaHub (22.30)
+
+meta: hub_id (случайный), hub_name, friend_code (MH-XXXX-XXXX-XXXX, без похожих знаков), friend_address. friend_hubs(hub_id,name,address,secret,status,created_at,last_seen,last_error), friend_hidden(path) — тайтлы, скрытые от друзей (POST /api/friends/hide, автор или админ).
+
+Сопряжение: POST /api/friends/add (админ: address, code, my_address) → наш сервер POST <друг>/api/federation/hello (code, hub_id, name, address=наш, nonce, protocol=1). Друг проверяет код (5 попыток в час с адреса), сам делает GET <наш адрес>/api/federation/verify?nonce= (отвечаем только на свой свежий nonce), создаёт secret и сохраняет нас; ответ — его hubId, name, address, secret. /api/federation/* открыты без входа; подписанные маршруты (ping, library, remove) проверяют X-MH-Hub, X-MH-Time (±5 мин), X-MH-Nonce (одноразовый 15 мин), X-MH-Address, X-MH-Sign = HMAC-SHA256(secret, «метод
+путь?query
+время
+nonce
+адрес»). Адрес отправителя обновляется у друга при каждом верном запросе.
+
+Для своих: GET /api/friends (все; админ — ещё me: code, name, address, addresses), POST /api/friends/me (name, address, new_code), /api/friends/remove (админ, сообщает другу), /api/friends/check, GET /api/friends/<hub_id>/library?kind= (полка друга через наш сервер; haveIt — уже есть у нас по external id или названию+году). Полка для друга (fed_library_items): все title_owners, кроме friend_hidden, без путей и логинов, постеры только внешние http(s).
+
+## События семьи и «в сети» (22.28 / Android 0.15.0)
+
+family_events(id,user_id,type,path,title,kind,created_at) — событие 'added' пишет family_prepare, когда новому пути назначается автор (не при переносе старой библиотеки). account_event_seen(user_id,last_id). accounts.show_activity (1 — семья видит, что я смотрю). AUTH_SEEN — время последнего запроса аккаунта (в сети 2 минуты).
+
+GET /api/family/feed: раз в минуту family_sync_all прогоняет family_prepare по трём разделам (новые папки → события), затем lastId, seenId, unread, events (30 последних чужих: user, title, path, inMyLibrary), presence (online, watching из account_playback_history за 2 минуты, если show_activity). POST /api/family/feed/seen (last_id). GET /api/family/new?kind=&limit= — чужие тайтлы не из моей библиотеки, новые сначала; /api/home добавляет секцию family-new. POST /api/auth/activity (show 0/1); auth_public отдаёт showActivity.
+
+Веб: #familyBell (счётчик, зелёная точка «кто-то в сети»), #familyPanel, опрос раз в 30 с, уведомления о новых событиях (localStorage mhFamilyNotified — первый раз без старых) и о начале просмотра. Android: data/FamilyFeed.kt — опрос раз в 30 с, пока приложение на экране, плашка FamilyNotice в MainScreen; ряд «Новое в семье» после «Продолжить просмотр».
+
+## «Семья»: автор тайтла и личная библиотека (22.25)
+
+Таблицы: title_owners(path,user_id,created_at) — автор; account_library(user_id,path,added_at,source own|added) — «Моя библиотека»; download_owners(hash,user_id) — кто запустил прямую загрузку (download_jobs перезаписывает организатор); family_claims(kind,external_id,title_key,user_id) — кто попросил Sonarr/Radarr (/api/add, /api/series/download, /api/movie/collection-download).
+
+family_prepare при каждом /api/library-cached назначает автора новым путям: download_owners по download_jobs.final_path → заявка по external id или названию → администратор. Первый раз для раздела (meta family_migrated_<kind>) всё — администратору, другим аккаунтам — проекты из их account_playback_history. family_view: scope=mine (по умолчанию), scope=family (только скачанное) или owner=<логин>; каждому тайтлу поля owner, inMyLibrary, canEdit, canDelete. Отслеживаемое без файлов видно администратору и заказавшему. /api/library-search фильтруется так же, «Недавно в моей библиотеке» на главной — по account_library.
+
+POST /api/my-library/add|remove (path), GET /api/family (аккаунты, library, uploaded). Обычный аккаунт может вызывать FAMILY_USER_POSTS (загрузки и правка); маршруты правки проверяют family_require_edit (автор или админ), удаление остаётся только администратору. family_move переносит автора, библиотеки и project истории при переименовании и объединении; forget_media_path чистит их при удалении.
+
+22.27: /api/downloads отдаёт owner и обычному аккаунту — только его торренты (download_owners); /api/download-action входит в FAMILY_USER_POSTS и проверяет, что все хеши его. family_annotate добавляет карточкам каталога (annotate_library_items, library_state_for_card) owner и inMyLibrary — веб показывает «Уже скачано в семье» с «Добавить к себе».
+
+Веб: #libScope (mine/family/user:<логин>, localStorage mhLibScope), decorateFamily под карточкой, applyItemRights скрывает правку и удаление.
+
+## Аватарки и быстрая смена аккаунта (22.23 / Android 0.13.0)
+
+accounts.avatar: '' (буква), 'preset:N' (1–12, одинаковый набор эмодзи и цветов в index.html AVATAR_PRESETS и в приложении AVATAR_PRESETS), 'img:<16 hex sha256>'. Фото — `<папка базы>/avatars/<id>.jpg`, FFmpeg приводит к 256×256 JPEG. auth_public отдаёт `avatar` (адрес /api/avatar/<id>-<хеш>.jpg или '') и `avatarPreset`. POST /api/auth/avatar: preset (0–12) или image (до 8 МБ); user_id — только администратор. GET /api/avatar/<id>-<хеш>.jpg доступен без входа, старый адрес после смены — 404. Клиенты заранее обрезают фото до квадрата 512×512.
+
+Веб: аватарка в верхней панели (#accountChip) открывает меню #accountMenu: текущий аккаунт, «Сменить на» (аккаунты из /api/auth/known), «Добавить аккаунт», «Аватарка и пароль», «Выйти». Android: AccountSwitcherDialog с аватарки вверху бокового меню ТВ и в углу главной телефона; SavedAccount хранит avatar/avatarPreset, refreshAccounts освежает их запросом /api/auth/me с токеном каждого аккаунта.
+
 ## Несколько аккаунтов на устройстве и внешний адрес (22.22 / Android 0.12.0)
 
 Адреса портала: домашние определяются сервером (`hostname -I`, порт MEDIAHUB_PORT или 8090), внешние администратор сохраняет в «Настройки → Аккаунт → Адреса подключения» (meta.connect_addresses, до пяти, http(s)://хост[:порт]). Login и GET /api/auth/me возвращают `addresses` — сначала домашние, затем внешние. GET/POST /api/auth/addresses (только администратор; поле external — адреса через перевод строки) отдают local, external и defaultPassword.
