@@ -504,7 +504,7 @@ async def account_access(request:Request,call_next):
     if not user:return JSONResponse({'detail':'Войдите в аккаунт'},status_code=401,headers={'Cache-Control':'no-store'})
     if request.method not in {'GET','HEAD','OPTIONS'} and not bearer.startswith('Bearer ') and request.headers.get('x-mediahub-auth')!='1':
         return JSONResponse({'detail':'Запрос требует подтверждения сессии'},status_code=403)
-    personal=path.startswith(('/api/auth/','/api/my-library/','/api/favorites')) or path in {'/api/player/progress','/api/remote/poll','/api/remote/state','/api/remote/send','/api/family/feed/seen','/api/friends/check','/api/friends/hide'}
+    personal=path.startswith(('/api/auth/','/api/my-library/','/api/favorites')) or path in {'/api/player/progress','/api/player/watched','/api/remote/poll','/api/remote/state','/api/remote/send','/api/family/feed/seen','/api/friends/check','/api/friends/hide'}
     # «Семья»: скачивать может любой аккаунт; править — автор (проверка в самом маршруте).
     personal=personal or path in FAMILY_USER_POSTS or bool(re.fullmatch(r'/api/friends/[0-9a-f]{16,64}/download|/api/friends/downloads/\d+/cancel',path))
     administrative=path.startswith(('/api/setup','/api/updates','/api/auth/accounts','/api/auth/addresses','/api/friends/me','/api/friends/add','/api/friends/remove','/api/family/summary','/api/family/owner','/api/activity','/api/service','/api/storage','/api/apps/tv-install','/api/preferences'))
@@ -627,6 +627,13 @@ def auth_addresses_settings():
     with cache_db() as con:admin=con.execute("select password_hash from accounts where login='admin'").fetchone()
     default=bool(admin) and hmac.compare_digest(admin['password_hash'],auth_password('admin',admin['password_hash'].split(':')[0]))
     return {'local':auth_lan_addresses(),'external':auth_external_addresses(),'defaultPassword':default}
+
+
+@app.get('/api/hub/info')
+def hub_info():
+    """Где работает хаб: версия, название, домашние и внешние адреса — для вкладки «Хаб» в настройках."""
+    with cache_db() as con:name=(con.execute("select value from meta where key='hub_name'").fetchone() or {'value':''})['value']
+    return {'version':APP_VERSION,'name':name or 'MediaHub','local':auth_lan_addresses(),'external':auth_external_addresses()}
 
 
 @app.post('/api/auth/addresses')
@@ -1642,6 +1649,8 @@ def cache_db():
         user_id integer not null,path text not null,project text not null,position real not null,
         duration real not null,completed integer not null default 0,signature text not null,updated_at real not null,
         primary key(user_id,path))""")
+    # 22.38: тайтл просмотрен целиком (все серии досмотрены или отмечен вручную) — отметка на карточках.
+    con.execute("create table if not exists account_watched(user_id integer not null,project text not null,created_at real not null,primary key(user_id,project))")
     if not con.execute("select 1 from accounts limit 1").fetchone():
         con.execute("insert or ignore into accounts(login,password_hash,is_admin) values(?,?,1)",('admin',auth_password('admin')))
     if not con.execute("select 1 from meta where key='account_history_migrated'").fetchone():
@@ -2425,6 +2434,7 @@ def forget_media_path(path_key:str):
             con.execute("delete from manual_meta where path=? or path like ?",(key,key+"/%"))
             con.execute("delete from title_owners where path=? or path like ?",(key,key+"/%"))
             con.execute("delete from account_library where path=? or path like ?",(key,key+"/%"))
+            con.execute("delete from account_watched where project=? or project like ?",(key,key+"/%"))
             con.commit()
     except Exception:
         pass
@@ -2494,9 +2504,13 @@ def import_folder_to_library(src:Path,kind:str,title:str,season:int):
 @app.get("/",response_class=HTMLResponse)
 async def home(request:Request):
     # Never let a browser/proxy pin an old MediaHub shell after an upgrade.
+    # Вход проверяем сразу на сервере: иначе при обновлении страницы форма
+    # входа мелькала, пока браузер ждал ответ /api/auth/me.
+    try:signed_in=bool(await asyncio.to_thread(auth_resolve,request.cookies.get('mh_session','')))
+    except Exception:signed_in=False
     return templates.TemplateResponse(
         "index.html",
-        {"request":request,"app_version":APP_VERSION},
+        {"request":request,"app_version":APP_VERSION,"signed_in":signed_in},
         headers={
             "Cache-Control":"no-store, no-cache, must-revalidate, max-age=0",
             "Pragma":"no-cache",
@@ -4287,6 +4301,12 @@ async def home_data(request:Request):
     except Exception:
         pass
 
+    try:
+        for section in sections:
+            if section.get("type")=="media":await asyncio.to_thread(family_mark_watched,section.get("items"))
+    except Exception:
+        pass
+
     return {
         "sections":sections,
         "sourceStates":states,
@@ -4395,6 +4415,7 @@ def family_view(kind,items,scope='mine',owner=''):
         logins={r['id']:r['login'] for r in con.execute('select id,login from accounts')}
         mine={r['path'] for r in con.execute('select path from account_library where user_id=?',(user['id'],))}
         hidden={r['path'] for r in con.execute('select path from friend_hidden')}
+        played,counts=family_watch_marks(con,user['id'])
         claims=con.execute('select external_id,title_key from family_claims where user_id=? and kind=?',(user['id'],kind)).fetchall()
         target=None
         if owner:
@@ -4404,7 +4425,8 @@ def family_view(kind,items,scope='mine',owner=''):
     admin=bool(user['is_admin']);result=[]
     for x in items:
         p=str(x.get('path') or '').rstrip('/');author=owners.get(p)
-        x.update({'owner':logins.get(author,''),'inMyLibrary':p in mine,'canEdit':admin or (bool(p) and author==user['id']),'canDelete':admin,'hiddenFromFriends':p in hidden})
+        x.update({'owner':logins.get(author,''),'inMyLibrary':p in mine,'canEdit':admin or (bool(p) and author==user['id']),'canDelete':admin,'hiddenFromFriends':p in hidden,
+                  'played':bool(p) and p in played,'watchedCount':counts.get(p,0)})
         if target is not None:keep=p in target
         elif scope=='family':keep=bool(p)
         elif p:keep=p in mine
@@ -4502,6 +4524,24 @@ def family_with_downloads(items,cards):
     return fresh+items
 
 
+def family_watch_marks(con,user_id):
+    """Просмотренные целиком тайтлы аккаунта и сколько серий досмотрено в каждом."""
+    played={r['project'].rstrip('/') for r in con.execute('select project from account_watched where user_id=?',(user_id,))}
+    counts={r['project'].rstrip('/'):r['n'] for r in con.execute('select project,count(*) n from account_playback_history where user_id=? and completed=1 group by project',(user_id,))}
+    return played,counts
+
+
+def family_mark_watched(items):
+    """Отметки «просмотрено» для карточек главной и других полок."""
+    user=AUTH_USER.get()
+    if not user:return items
+    with cache_db() as con:played,counts=family_watch_marks(con,user['id'])
+    for x in items or []:
+        p=str(x.get('path') or x.get('projectPath') or '').rstrip('/')
+        if p:x.update(played=p in played,watchedCount=counts.get(p,0))
+    return items
+
+
 def family_move(con,old,new):
     """Папку переименовали или присоединили к другой: автор и личные библиотеки переезжают на новый путь."""
     old=str(old or '').rstrip('/');new=str(new or '').rstrip('/')
@@ -4509,6 +4549,7 @@ def family_move(con,old,new):
     con.execute('insert or ignore into title_owners select ?,user_id,created_at from title_owners where path=?',(new,old))
     con.execute('insert or ignore into account_library select user_id,?,added_at,source from account_library where path=?',(new,old))
     con.execute('update account_playback_history set project=? where project=?',(new,old))
+    con.execute('update or ignore account_watched set project=? where project=?',(new,old));con.execute('delete from account_watched where project=?',(old,))
     con.execute('delete from title_owners where path=?',(old,));con.execute('delete from account_library where path=?',(old,))
 
 
@@ -4578,6 +4619,7 @@ def family_job_events(con):
         card=family_title_rows(con,[p]).get(p)
         con.execute("insert into family_events(user_id,type,path,title,kind,created_at) values(?,'updated',?,?,?,?)",
                     (r['user_id'],p,(card['title'] if card else '') or r['media_title'] or Path(p).name,(card['kind'] if card else '') or r['kind'],time.time()))
+        con.execute('delete from account_watched where project=?',(p,))
     con.execute("insert or replace into meta(key,value) values('family_jobs_at',?)",(rows[-1]['completed_at'],));con.commit()
 
 
@@ -6108,7 +6150,9 @@ async def player_project(path:str=Query(...)):
     resume=latest
     if latest and latest['completed']:
         index=items.index(latest);resume=items[index+1] if index+1<len(items) else None
-    return {'project':str(Path(path)),'items':items,'last':latest,'resume':resume,'count':len(items),'watched':sum(x['completed'] for x in items),'truncated':listing.get('truncated',False)}
+    with cache_db() as con:
+        played=bool(con.execute('select 1 from account_watched where user_id=? and project=?',(auth_user_id(),str(Path(path).resolve()))).fetchone())
+    return {'project':str(Path(path)),'items':items,'last':latest,'resume':resume,'count':len(items),'watched':sum(x['completed'] for x in items),'played':played,'truncated':listing.get('truncated',False)}
 
 
 @app.api_route('/api/player/file',methods=['GET','HEAD'])
@@ -6138,9 +6182,58 @@ async def player_progress(path:str=Form(...),position:float=Form(...),duration:f
     f=player_file(path)
     if not math.isfinite(position) or not math.isfinite(duration) or position<0 or duration<=0 or duration>7*86400:raise HTTPException(400,'Некорректная позиция просмотра')
     position=min(position,duration);completed=int(bool(ended) or position>=max(duration*.85,duration-180))
+    project=str(_project_root_for(f))
     with cache_db() as con:
-        con.execute('insert or replace into account_playback_history values(?,?,?,?,?,?,?,?)',(auth_user_id(),str(f),str(_project_root_for(f)),position,duration,completed,player_signature(f),time.time()));con.commit()
-    return {'ok':True,'completed':bool(completed)}
+        con.execute('insert or replace into account_playback_history values(?,?,?,?,?,?,?,?)',(auth_user_id(),str(f),project,position,duration,completed,player_signature(f),time.time()));con.commit()
+    # Досмотрена последняя недосмотренная серия — тайтл целиком «просмотрен».
+    played=await player_title_done(project) if completed else False
+    return {'ok':True,'completed':bool(completed),'played':played}
+
+
+async def player_title_videos(project):
+    """Видеофайлы тайтла (пути как в истории просмотра)."""
+    listing=await library_files(project)
+    return [Path(x['path']).resolve() for x in listing['items'] if x['video'] and safe_media_path(Path(x['path']))]
+
+
+async def player_title_done(project):
+    """Все серии тайтла досмотрены этим аккаунтом — отметить тайтл просмотренным."""
+    # Список файлов недоступен — прогресс всё равно сохранён, отметка тайтла подождёт.
+    try:videos={str(f) for f in await player_title_videos(project)}
+    except Exception:return False
+    uid=auth_user_id()
+    with cache_db() as con:
+        done={r['path'] for r in con.execute('select path from account_playback_history where user_id=? and project=? and completed=1',(uid,project))}
+        if not videos or not videos<=done:return False
+        con.execute('insert or ignore into account_watched values(?,?,?)',(uid,project,time.time()));con.commit()
+    return True
+
+
+@app.post('/api/player/watched')
+async def player_watched(path:str=Form(...),watched:int=Form(1)):
+    """Отметка «просмотрено» вручную: путь к видеофайлу — одна серия, путь к папке тайтла — все серии сразу.
+    Снять отметку — серия начнётся сначала, тайтл перестанет быть «просмотренным»."""
+    target=Path(path or '')
+    if target.is_file():
+        f=player_file(path);files=[f];project=str(_project_root_for(f))
+    else:
+        files=await player_title_videos(path)
+        if not files:raise HTTPException(404,'В тайтле нет видео')
+        project=str(_project_root_for(files[0]))
+    uid=auth_user_id();now=time.time()
+    with cache_db() as con:
+        if watched:
+            old={r['path']:r['duration'] for r in con.execute('select path,duration from account_playback_history where user_id=? and project=?',(uid,project))}
+            for f in files:
+                duration=old.get(str(f)) or 1.0
+                con.execute('insert or replace into account_playback_history values(?,?,?,?,?,1,?,?)',(uid,str(f),project,duration,duration,player_signature(f),now))
+            if not target.is_file():con.execute('insert or ignore into account_watched values(?,?,?)',(uid,project,now))
+        else:
+            con.executemany('delete from account_playback_history where user_id=? and path=?',[(uid,str(f)) for f in files])
+            con.execute('delete from account_watched where user_id=? and project=?',(uid,project))
+        con.commit()
+    played=await player_title_done(project) if watched and target.is_file() else bool(watched and not target.is_file())
+    return {'ok':True,'watched':bool(watched),'played':played,'project':project}
 
 
 # Пульт: телефон выбирает тайтл, телевизор с открытым приложением его запускает.
@@ -8913,6 +9006,7 @@ async def provider_grab(
             "ok":True,
             "message":"Загрузка подтверждена. После завершения MediaHub сам перенесёт её в библиотеку и уберёт задачу из qBittorrent.",
             "torrent":detected.get("name"),
+            "hash":detected.get("hash"),
             "category":category
         }
     return {
@@ -9442,6 +9536,17 @@ async def quality_search_upgrades(series_id:int=Form(...),season_number:int=Form
     except Exception as e:
         return JSONResponse({"ok":False,"error":str(e)},status_code=500)
 
+@app.get("/api/downloads/active")
+async def downloads_active():
+    """Ряд главной «Скачивается»: свои загрузки всех разделов, администратору — все, с прогрессом."""
+    torrents=await family_torrents()
+    user=AUTH_USER.get();scope='family' if not user or user['is_admin'] else 'mine'
+    def build():
+        cards=[c for kind in ('tv','movies','anime') for c in family_download_cards(kind,torrents,scope)]
+        return sorted(cards,key=lambda c:-c['downloadProgress'])
+    return await asyncio.to_thread(build)
+
+
 @app.get("/api/downloads")
 async def downloads():
     c=await qbit_login()
@@ -9510,7 +9615,7 @@ def clean_page_title(raw):
     if not title:
         return ""
     # Всё после названия площадки — мусор.
-    title=re.split(r"\s*[»«|]\s*",title)[0]
+    title=re.split(r"\s*[»«|]\s*|\s+::\s+",title)[0]
     title=re.sub(r"\s*[-–—]\s*[^-–—]*(?:онлайн|аниме|сериал[ыа]?|фильм[ыы]?|портал|сайт)[^-–—]*$","",title,flags=re.I)
     # «Оригинал / Русское название (RUS)» — оставляем русскую часть.
     parts=[p.strip() for p in re.split(r"\s*/\s*",title) if p.strip()]
@@ -9527,6 +9632,15 @@ def clean_page_title(raw):
     title=SITE_TITLE_NOISE.sub("",title)
     title=" ".join(title.split()).strip(" -–—|:,.")
     return title[:160]
+
+
+def seo_description(value):
+    """Рекламная строка сайта вместо описания: «Скачать торрент … бесплатно»."""
+    value=" ".join(str(value or "").split())
+    if not value:return False
+    if re.search(r"(?:скачать|download).{0,120}(?:торрент|torrent)|(?:торрент|torrent).{0,60}(?:скачать|download)|for free|magnet link|без регистрации",value,re.I):
+        return len(value)<400
+    return bool(re.fullmatch(r"[^.!?]{0,60}\|\s*[\d.,]+\s*[KMGT]i?B.*",value,re.I) or re.match(r"^(?:anime|movies?|tv)\s*-\s*[\w -]+\|",value,re.I))
 
 
 def page_media_metadata(soup,html,url):
@@ -9550,7 +9664,7 @@ def page_media_metadata(soup,html,url):
     for line in content.get_text("\n",strip=True).splitlines():
         line=text(line)
         if line:lines.append(line)
-    labels={"title":r"(?:название|русское название|name|title)","year":r"(?:год(?: выхода| выпуска)?|year|release year)",
+    labels={"title":r"(?:название|русское название|name|title)","original":r"(?:оригинальное название|original title|оригинал)","year":r"(?:год(?: выхода| выпуска)?|year|release year)",
             "overview":r"(?:о фильме|о сериале|об аниме|описание|сюжет|description|synopsis|plot)","genres":r"(?:жанр[ы]?|genres?)"}
     fields={}
     for i,line in enumerate(lines):
@@ -9604,11 +9718,17 @@ def page_media_metadata(soup,html,url):
         genre_label=content.find(string=re.compile(r"^\s*(?:жанры?|genres?)\s*[:：]",re.I))
         genre_text=genre_label.parent.parent.get_text(" ",strip=True) if genre_label and genre_label.parent.parent else fields["genres"]
         genre_text=re.sub(r"^.*?(?:жанры?|genres?)\s*[:：]","",genre_text,flags=re.I)
-        genre_text=re.split(r"(?:режисс[её]р|director|страна|country|о фильме)\s*:",genre_text,flags=re.I)[0]
+        genre_text=re.split(r"(?:режисс[её]р|director|страна|country|о фильме|выпущено|производство|год выпуска|в ролях|продолжительность|перевод)\s*:",genre_text,flags=re.I)[0]
+        genre_text=re.split(r"\s[А-ЯЁA-Z][\w-]*(?:\s[\w-]+){0,2}\s*:",genre_text)[0]
         if len(genre_text)>200:genre_text=fields["genres"]
         meta["genres"]=[x.strip() for x in re.split(r"[,;/]",genre_text) if x.strip()][:10]
     heading=content.select_one("h1, #news-title, [itemprop='name'], h2") or soup.find("h1")
     heading_text=heading.get_text(" ",strip=True) if heading else ""
+    # Полное имя раздачи («Бегущая / The Runner (2026) WEB-DL 1080p») — подпись
+    # для торрента, у которого на странице нет своего названия.
+    meta["releaseTitle"]=" ".join((heading_text or tag_value("og:title") or (soup.title.get_text() if soup.title else "")).split())[:200]
+    meta["releaseTitle"]=re.split(r"\s+::\s+|\s+[|»]\s+",meta["releaseTitle"])[0].strip()
+    if seo_description(meta["overview"]):meta["overview"]=""
     if not meta["title"]:meta["title"]=heading_text or (soup.title.get_text() if soup.title else "")
     raw_title=re.sub(r"^\s*[a-z0-9.-]+\s*::\s*","",meta["title"],flags=re.I)
     if not meta["year"]:
@@ -9616,11 +9736,19 @@ def page_media_metadata(soup,html,url):
         if match:meta["year"]=match.group(0)
     meta["title"]=clean_page_title(raw_title)
     meta["title"]=re.sub(r"\s+(?:WEB[- ]?(?:DL|Rip)|BDRip|BluRay|HDTV|DVD[- ]?Rip|\d{3,4}p)\b.*$","",meta["title"],flags=re.I).strip()
+    # «Фрирен (10 из 10) Complete», «… (unofficial batch)» — служебные пометки раздачи.
+    meta["title"]=re.sub(r"\s*\([^()]*\b(?:batch|unofficial|complete|из|of|эп\.?|серии|серий|episodes?)\b[^()]*\)","",meta["title"],flags=re.I)
+    meta["title"]=re.sub(r"\s+(?:complete|batch|завершён|завершен)$","",meta["title"],flags=re.I).strip()
+    # «Курьер (Runner)»: русское название, в скобках — оригинальное.
+    pair=re.fullmatch(r"(.*[а-яё].*?)\s*\(([^()а-яё]*[a-z][^()а-яё]*)\)",meta["title"],re.I)
+    if pair:meta["title"],original=pair.group(1).strip(),pair.group(2).strip()
+    else:original=""
+    meta["originalTitle"]=" ".join((fields.get("original") or original).split())[:160]
     body=" ".join(lines)[:180000]
     if not meta["overview"]:
         candidates=content.select("[itemprop='description'], .description, .synopsis, .plot, .full-text, p")
         paragraphs=[text(x.get_text(" ",strip=True)) for x in candidates]
-        paragraphs=[x for x in paragraphs if 100<=len(x)<=5000 and not re.search(r"(?:cookie|авторизац|зарегистр|права защищены)",x,re.I)]
+        paragraphs=[x for x in paragraphs if 100<=len(x)<=5000 and not re.search(r"(?:cookie|авторизац|зарегистр|права защищены)",x,re.I) and not seo_description(x)]
         if paragraphs:meta["overview"]=max(paragraphs,key=len)
     meta["overview"]=text(meta["overview"])[:2000]
     if not meta["poster"]:
@@ -9635,6 +9763,8 @@ def page_media_metadata(soup,html,url):
     if meta["poster"]:
         meta["poster"]=urljoin(url,meta["poster"])
         if urlparse(meta["poster"]).scheme not in {"http","https"}:meta["poster"]=""
+        # Логотип сайта в og:image — не постер; его заменит TMDB, если найдёт.
+        if re.search(r"logo|favicon|apple-touch|/icons?/|sprite|default|placeholder",meta["poster"],re.I):meta["posterWeak"]=True
     if not meta["episodes"]:
         match=re.search(r"(?:эпизод(?:ы|ов)?|серии|серий|episodes)\s*[:—-]?\s*(\d{1,4})|(?:\(|\b)(\d{1,4})\s*(?:эп\.|серий|episodes)",body,re.I)
         if match:meta["episodes"]=int(match.group(1) or match.group(2))
@@ -9642,6 +9772,82 @@ def page_media_metadata(soup,html,url):
         match=re.search(r"\bS(\d{1,2})\b|(?:сезон|season)\s*[:#]?\s*(\d{1,2})",heading_text or (soup.title.get_text() if soup.title else raw_title),re.I)
         if match:meta["season"]=int(match.group(1) or match.group(2))
     meta["suggestedCategory"]="anime" if re.search(r"(?:аниме|anime)",body[:30000],re.I) else "tv" if meta["season"] or re.search(r"(?:сериал|TVSeries)",body[:30000],re.I) else "movies"
+    meta["missingFields"]=[key for key in ("title","year","poster","overview") if not meta.get(key)]
+    return meta
+
+
+def _clean_link_title(title):
+    """Подпись раздачи без даты, сидов, «Скачать» и имени сайта."""
+    title=" ".join(str(title or "").split())
+    title=re.sub(r"[^\w)\].]+$","",title)
+    title=re.sub(r"^(?:\[?[\w-]+\.(?:info|org|com|net|ru|is|to|me|tv|vip|cc|lol|si|top|club)\]?[_ :-]+)","",title,flags=re.I)
+    title=re.sub(r"^(?:скачать|download)(?:\s+(?:торрент|torrent|файл))?\s*[:-]?\s*","",title,flags=re.I)
+    title=re.sub(r"\.torrent$|\s+torrent$","",title,flags=re.I)
+    title=re.sub(r"^\d{1,2}\s+[А-ЯЁA-Zа-яёa-z]{3}\.?\s+\d{2,4}\s+","",title)
+    title=re.sub(r"(\s+\d+){1,3}$","",title) if re.search(r"\d+(?:[.,]\d+)?\s*[KMGT]i?B\s+\d+(?:\s+\d+)*$",title,re.I) else title
+    title=re.sub(r"\s+(\d+(?:[.,]\d+)?\s*[KMGT]i?B)$",r" · \1",title,flags=re.I)
+    return title.strip(" -|:")[:200]
+
+
+def rank_page_links(links,url,meta):
+    """Раздача самой страницы — первой; соседние списки — после неё.
+
+    «Своя» раздача: ссылка с номером страницы (/torrent/123 → /download/123) или
+    стоящая вне списка других раздач. Подписи без мусора, а у торрента без имени
+    — имя раздачи из заголовка страницы.
+    """
+    topic=_page_topic_id(url)
+    release=(meta or {}).get("releaseTitle") or (meta or {}).get("title") or ""
+    out=[]
+    for link in links:
+        x={k:v for k,v in link.items() if k!="listed"}
+        own=bool(topic) and x["type"]=="torrent" and _page_topic_id(x["url"])==topic
+        x["main"]=own or link.get("listed") is False
+        title=_clean_link_title(x.get("title"))
+        slug=bool(re.fullmatch(r"[a-z0-9_.-]+",title)) and "_" in title or "-" in title and title==title.lower() and " " not in title
+        if not title or title.isdigit() or slug or not re.search(r"\w{2}",title) or re.fullmatch(r"(?:magnet-ссылка|скачать|download|торрент|torrent)",title,re.I):
+            title=_clean_link_title(x.get("context")) if x.get("context") and not x["main"] else ""
+            title=title or (release if x["main"] else "") or _clean_link_title(x.get("title"))
+        x["title"]=title
+        out.append(x)
+    # Своя раздача, затем остальные в порядке страницы; magnet раньше файла.
+    out.sort(key=lambda x:(not x["main"],))
+    return out
+
+
+async def enrich_page_meta(meta):
+    """Дополнить описание и постер из TMDB, если на странице их нет или там реклама.
+
+    Берём только уверенное совпадение: то же название и тот же год (±1).
+    """
+    if not TMDB_KEY or not meta.get("title") or (meta.get("overview") and meta.get("poster")):
+        return meta
+    kind="movies" if meta.get("suggestedCategory")=="movies" else "tv"
+    query=re.sub(r"\s*(?:\d+(?:st|nd|rd|th)\s+season|season\s*\d+|\d+\s*сезон|сезон\s*\d+|\([^)]*\))\s*"," ",meta["title"],flags=re.I).strip()
+    try:rows=await tmdb_search(query,kind)
+    except Exception:rows=[]
+    if not rows and meta.get("originalTitle"):
+        query=meta["originalTitle"]
+        try:rows=await tmdb_search(query,kind)
+        except Exception:rows=[]
+    if not rows and kind=="tv":
+        try:rows=await tmdb_search(query,"movies")
+        except Exception:rows=[]
+    want=normalize_search_text(query)
+    year=str(meta.get("year") or "")
+    best=None
+    for x in rows[:10]:
+        same_year=not year or not x.get("year") or abs(int(x["year"])-int(year))<=1
+        if not same_year:continue
+        score=SequenceMatcher(None,want,normalize_search_text(x.get("title") or "")).ratio()
+        if score>=0.6 and (not best or score>best[0]):best=(score,x)
+    if not best and rows and year and len(rows)<=3 and rows[0].get("year")==year:best=(1,rows[0])
+    if not best:return meta
+    x=best[1]
+    if not meta.get("overview") and x.get("overview"):meta["overview"]=x["overview"];meta["overviewSource"]="TMDB"
+    if (not meta.get("poster") or meta.get("posterWeak")) and x.get("poster"):meta["poster"]=x["poster"];meta["posterSource"]="TMDB"
+    if not meta.get("year") and x.get("year"):meta["year"]=x["year"]
+    meta["tmdbTitle"]=x.get("title") or ""
     meta["missingFields"]=[key for key in ("title","year","poster","overview") if not meta.get(key)]
     return meta
 
@@ -9654,7 +9860,7 @@ def page_link_candidates(soup,html,url):
     from urllib.parse import urljoin,urlparse,parse_qs,unquote
     from html import unescape
     found=[]; seen=set()
-    def add(raw,label="",context=""):
+    def add(raw,label="",context="",listed=None):
         """Проверить кандидат и добавить уникальную ссылку с подписью."""
         raw=unescape(str(raw or "")).strip().replace("\\/","/")
         if raw.lower().startswith("magnet:?"):
@@ -9673,21 +9879,41 @@ def page_link_candidates(soup,html,url):
             labelled=bool(re.search(r"(?:скачать\s+торрент|download\s+torrent|\.torrent)",label,re.I))
             if not explicit and not labelled:return
             if re.search(r"(?:utorrent|bittorrent)\.com|play\.google\.com",parts.netloc,re.I):return
+            # Аватары и картинки форума: download/file.php?avatar=…gif.
+            if re.search(r"\.(?:gif|jpe?g|png|webp|svg|ico)(?:[?&#]|$)|[?&](?:avatar|image|img|thumb)=",low):return
             key=full;name="";kind="torrent"
         if key in seen:return
         seen.add(key)
         fallback=parts.path.rsplit("/",1)[-1] if kind=="torrent" else "Magnet-ссылка"
+        if kind=="torrent":
+            # На fast-torrent и похожих сайтах все кнопки подписаны «Скачать»,
+            # а качество и автор раздачи есть только в имени файла.
+            filename=re.sub(r"\.torrent$","",unquote(fallback),flags=re.I).strip()
+            if filename!=unquote(fallback).strip() and re.fullmatch(r"\s*(?:скачать|download|торрент|torrent)?(?:\s+(?:торрент|torrent|файл))?\s*",label or "",re.I):
+                label=filename
         title=" ".join((name or label or context or fallback).split())[:200]
         info=" ".join(context.split())[:300]
-        found.append({"type":kind,"url":full,"title":title,"context":info})
+        found.append({"type":kind,"url":full,"title":title,"context":info,"listed":listed})
+    def listed_row(tag):
+        """Ссылка стоит в строке списка раздач (таблица «похожие», «другие версии»)."""
+        row=tag.find_parent(["tr","li"])
+        box=row.find_parent(["table","ul","ol"]) if row else None
+        if not box:return False
+        rows=0
+        for other in box.find_all(["tr","li"],limit=60):
+            if other.find("a",href=re.compile(r"magnet:|\.torrent|/download|download\.php|/dl/",re.I)):
+                rows+=1
+                if rows>=2:return True
+        return False
     for tag in soup.find_all(["a","button","input"]):
         label=tag.get_text(" ",strip=True) or tag.get("title") or tag.get("value") or ""
         parent=tag.find_parent(["tr","p","li"])
         context=parent.get_text(" ",strip=True) if parent else label
+        listed=listed_row(tag)
         for attr in ("href","data-href","data-url","data-download","data-magnet","data-clipboard-text","data-torrent","value"):
-            if tag.get(attr):add(tag[attr],label,context)
+            if tag.get(attr):add(tag[attr],label,context,listed)
         for raw in re.findall(r"[\"']((?:https?://|/|magnet:\?)[^\"']+)[\"']",tag.get("onclick") or ""):
-            add(raw,label,context)
+            add(raw,label,context,listed)
     # Строковые URL часто лежат в JSON/JS; код страницы не запускается.
     decoded=unescape(html).replace("\\/","/")
     decoded=re.sub(r"\\u([0-9a-fA-F]{4})",lambda m:chr(int(m.group(1),16)),decoded)
@@ -9896,7 +10122,9 @@ async def torrent_links_from_page(url:str,return_meta=False):
             return (links,empty) if return_meta else (links,"")
         html=decode_page_html(response);soup=BeautifulSoup(html,"html.parser")
         meta=page_media_metadata(soup,html,str(response.url));meta["sourceUrl"]=url
+        meta["title"]=re.sub(r"(?<=[^\s(])\(", " (",meta.get("title") or "")
         links,truncated=page_link_candidates(soup,html,str(response.url))
+        links=rank_page_links(links,str(response.url),meta)
         if truncated:meta["warning"]="Показаны первые 80 ссылок; на странице есть ещё варианты"
         if not links and _page_needs_login(str(response.url),soup):
             host=urlparse_host(str(response.url))
@@ -10018,14 +10246,121 @@ def _magnet_name(magnet:str):
     except Exception:
         return ""
 
+def _page_topic_id(url):
+    """Номер раздачи в адресе трекера: ?t=, ?id=, ?topic= или число в пути."""
+    from urllib.parse import urlparse,parse_qs
+    parts=urlparse(url or "")
+    query=parse_qs(parts.query)
+    for key in ("t","id","topic","tid","torrent"):
+        value=(query.get(key) or [""])[0]
+        if value.isdigit():return value
+    found=re.findall(r"(?<![\w])(\d{3,})(?![\w])",parts.path)
+    return found[-1] if found else ""
+
+
+def _same_tracker(a,b):
+    """Один ли это трекер с учётом зеркал: kinozaltv.life и kinozal.tv — да."""
+    def core(url):
+        host=urlparse_host(url).casefold()
+        return host.split(".")[0] if host.count(".") else host
+    x,y=core(a),core(b)
+    if not x or not y:return False
+    n=min(len(x),len(y))
+    return n>=4 and x[:n]==y[:n] or x[:6]==y[:6] and min(len(x),len(y))>=6
+
+
+def _release_size_text(size):
+    """Размер релиза по-русски для подписи варианта."""
+    size=int(size or 0)
+    if size>=1024**3:return f"{size/1024**3:.1f} ГБ"
+    if size>=1024**2:return f"{size/1024**2:.0f} МБ"
+    return ""
+
+
+async def _prowlarr_page_links(page_url,title,year,kind="movies",original=""):
+    """Ищет раздачу со страницы через Prowlarr: сначала ту же самую, потом похожие.
+
+    Нужен, когда страница трекера закрыта входом или защитой от ботов, а у
+    Prowlarr на этот трекер есть вход. Возвращает варианты типа «prowlarr»:
+    их url — prowlarr:<токен релиза>, скачивание идёт через provider_grab.
+    """
+    if not PROWLARR_KEY or not (title or "").strip():
+        return []
+    query=" ".join(x for x in ((title or "").strip(),str(year or "").strip()) if x)
+    ids=await enabled_indexer_ids()
+    if not ids:return []
+    async def one(idx):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(25.0,connect=5.0),trust_env=False) as c:
+                r=await c.get(PROWLARR_URL+"/api/v1/search",headers={"X-Api-Key":PROWLARR_KEY},
+                              params=[("query",query),("type","search"),("indexerIds",str(idx)),("limit","100"),("offset","0")])
+                return r.json() if r.status_code<300 else []
+        except Exception:
+            return []
+    rows=[x for group in await asyncio.gather(*(one(i) for i in ids)) for x in (group or []) if isinstance(x,dict)]
+    topic=_page_topic_id(page_url)
+    def exact(x):
+        for key in ("infoUrl","guid","commentUrl"):
+            link=str(x.get(key) or "")
+            if topic and link.startswith(("http://","https://")) and _page_topic_id(link)==topic and _same_tracker(link,page_url):
+                return True
+        return False
+    card={"title":title,"originalTitle":original}
+    expected=_expected_title_sets(card)
+    same=[x for x in rows if exact(x)]
+    similar=[] if same else [x for x in rows if release_relevance(x.get("title"),expected,str(year or ""),kind)["ok"]]
+    similar.sort(key=lambda x:int(x.get("seeders") or 0),reverse=True)
+    out=[]
+    for x in (same+similar)[:12]:
+        token=store_release(kind,x)
+        bits=[str(x.get("indexer") or "Prowlarr"),_release_size_text(x.get("size")),f"сиды {int(x.get('seeders') or 0)}"]
+        out.append({"type":"prowlarr","url":"prowlarr:"+token,
+                    "title":" ".join(str(x.get("title") or "Раздача").split())[:200],
+                    "context":("Эта же раздача через Prowlarr · " if x in same else "Похожая раздача через Prowlarr · ")+" · ".join(b for b in bits if b),
+                    "same":x in same})
+    return out
+
+
 @app.post("/api/torrent-page-preview")
-async def torrent_page_preview(page_url:str=Form(...)):
-    """Показать данные страницы и варианты раздач, сохранив их для выбранной загрузки."""
+async def torrent_page_preview(page_url:str=Form(...),title_hint:str=Form("")):
+    """Показать данные страницы и варианты раздач, сохранив их для выбранной загрузки.
+
+    Если страница не отдаёт торрент (нужен вход, защита от ботов), ищем ту же
+    раздачу через Prowlarr по названию со страницы или из поля «Название».
+    """
     import secrets
     url=page_url.strip()
     if not url.lower().startswith(("http://","https://")):
         raise HTTPException(400,"Нужна ссылка http или https на страницу проекта")
     links,meta=await torrent_links_from_page(url,return_meta=True)
+    if meta.get("title"):
+        try:meta=await enrich_page_meta(meta)
+        except Exception:pass
+    page_error=meta.get("error") or ""
+    if not links:
+        title=meta.get("title") or (title_hint or "").strip()
+        year=meta.get("year") or ""
+        if not year:
+            found=re.search(r"\b(19|20)\d{2}\b",title_hint or "")
+            year=found.group(0) if found else ""
+            if found and not meta.get("title"):title=(title_hint or "").replace(found.group(0)," ").strip(" ()")
+        kind=meta.get("suggestedCategory") if meta.get("suggestedCategory") in {"movies","tv","anime"} else "movies"
+        try:found_links=await _prowlarr_page_links(url,title,year,kind,meta.get("originalTitle") or "")
+        except Exception:found_links=[]
+        if found_links:
+            links=found_links
+            same=any(x.get("same") for x in found_links)
+            if not meta.get("title"):meta["title"]=title;meta["year"]=year
+            reason="Страница не отдаёт торрент" if not page_error else page_error[:1].upper()+page_error[1:].rstrip(".")
+            meta["error"]=""
+            meta["warning"]=(f"{reason}. " if page_error else "")+("Нашёл эту же раздачу через Prowlarr — выберите её." if same else "Эту раздачу Prowlarr не нашёл, но есть похожие с подключённых трекеров.")
+            meta.pop("error",None)
+        elif not meta.get("title") and page_error:
+            if "403" in page_error or "503" in page_error:
+                page_error=f"{urlparse_host(url)} закрыт защитой от ботов и не открывается с сервера"
+            raise HTTPException(400,page_error[:1].upper()+page_error[1:]+(". Впишите название фильма в поле «Название» и нажмите «Получить данные страницы» ещё раз — MediaHub поищет раздачу через Prowlarr." if PROWLARR_KEY else ". Можно приложить свой .torrent."))
+        elif page_error and PROWLARR_KEY and title:
+            meta["error"]=page_error.rstrip(".")+". Через Prowlarr такой раздачи тоже не нашлось."
     if not meta.get("title") and meta.get("error"):
         raise HTTPException(400,meta["error"])
     now=time.monotonic()
@@ -10086,6 +10421,20 @@ async def torrent_upload(
         if not chosen and len(links)>1:
             return JSONResponse({"detail":"На странице несколько раздач. Получите данные страницы и выберите нужную ссылку.","links":links},status_code=409)
         chosen=chosen or links[0]
+        if chosen["type"]=="prowlarr":
+            result=await provider_grab(token=chosen["url"].split(":",1)[1],category=category,
+                                       media_title=media_title.strip() or page_meta.get("title") or "",season=season,force="0")
+            if isinstance(result,JSONResponse):return result
+            if result.get("hash") and (page_meta.get("poster") or page_meta.get("overview")):
+                with cache_db() as con:
+                    con.execute("""insert or replace into download_meta
+                        (hash,title,year,poster,overview,source_url,created_at)
+                        values(?,?,?,?,?,?,?)""",
+                        (result["hash"],page_meta.get("title") or media_title,page_meta.get("year") or "",
+                         page_meta.get("poster") or "",page_meta.get("overview") or "",page_url,
+                         datetime.now(timezone.utc).isoformat()))
+                    con.commit()
+            return {**result,"meta":{k:v for k,v in page_meta.items() if k in {"title","year","poster","overview","sourceUrl"}}}
         if chosen["type"]=="magnet":magnet=chosen["url"]
         else:
             content,found_magnet,error=await fetch_torrent_bytes(chosen["url"],referer=page_url)

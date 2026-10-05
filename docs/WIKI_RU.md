@@ -254,6 +254,18 @@ GET /api/player/resume возвращает {items: [...]} с незавершё
 - Единственный Android-пакет лежит в `static/`, описание в `android.json`. Сборочный проект Android и ключи подписи ведутся отдельно.
 
 
+## «Просмотрено» и «Где работает MediaHub» (22.38)
+
+account_watched(user_id,project,created_at) — тайтл просмотрен целиком. Ставится в /api/player/progress, когда серия досмотрена (completed) и все видео тайтла (player_title_videos через library_files) досмотрены этим аккаунтом (player_title_done), или вручную. POST /api/player/watched (path, watched=1|0) — личный маршрут: путь к файлу — одна серия (completed=1, позиция = длительность или 1 с; снятие удаляет строку истории), путь к папке — все серии и отметка тайтла; ответ {watched, played, project}. Снимается при «новых сериях» (family_job_events) и вместе с удалением тайтла, переезжает в family_move. /api/library-cached: played, watchedCount (family_watch_marks); /api/home — те же поля у медиаполок (family_mark_watched); /api/player/project — played.
+
+GET /api/hub/info — версия, название, local и external адреса; любому аккаунту. Веб: блок #hubWhere во вкладке «Хаб и приложения» (loadHubWhere), администратору — службы из /api/setup/status (порт, «Работает/Остановлен»).
+
+## «Скачивается» на главной, вкладки «Настроек» (22.37)
+
+GET /api/downloads/active — карточки family_download_cards всех разделов (kind в карточке), обычному аккаунту — свои, администратору — все (scope family), по убыванию прогресса. Веб: loadHomeDownloads после renderHome, секция id=downloads вставляется в withFriendsNew после «Продолжить просмотр»; круги обновляются раз в 6 с на открытой главной, исчезновение загрузки перечитывает главную. Приложение: activeDownloads(), ряд DOWNLOADS_ROW, HomeViewModel.refreshDownloads по onDownloadsTick раз в 8 с.
+
+Веб-навигация: в .sideNav и .mobileNav нет пунктов activity, quality, files, services, settings. Они открываются вкладками #settingsTabs (переносится в начало показанной страницы, placeSettingsTabs в showPage; SETTINGS_PAGES подсвечивают «Настройки»). Страница setup делится на вкладки account (#hubAccount, #hubInterface) и hub (остальное) классом tabHidden; выбор помнит localStorage mhSetupTab. Вкладки служебных страниц видны только администратору.
+
 ## Загрузки в библиотеке, «Скачалось», «Новое у друзей» (22.35)
 
 GET /api/library-cached добавляет впереди карточки незавершённых загрузок раздела: family_download_cards берёт раздачи qBittorrent (family_torrents — кэш 4 с, при молчащем qBittorrent 30 с, ожидание не больше 4 с) с download_jobs.status='downloading' этого kind, название и постер из download_meta, автора из download_owners, а также friend_downloads queued/downloading. Поля карточки: key (dl:<hash> или friend:<id>), downloading, downloadProgress (0–100), downloadLabel, downloadSource, path ''. Видимость: автор; «Вся семья» — все; owner=логин — его загрузки; админ в своей библиотеке видит ещё загрузки без автора. family_with_downloads: если тайтл уже есть (то же название, год совпадает или не задан), прогресс ставится на его карточку, отдельной нет. Веб: круг прогресса (decorateDownloads), обновление раз в 6 с без перерисовки; карточка без файлов не открывается. Приложение: MediaItem.downloading/downloadProgress/downloadLabel, DownloadOverlay на постере, тихое обновление сетки раз в 8 с; libraryItems(downloads=true) только для сетки раздела.

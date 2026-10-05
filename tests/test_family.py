@@ -213,6 +213,25 @@ class FamilyTests(unittest.TestCase):
         self.assertEqual(feed['mine'],[])
         self.assertEqual([(e['type'],e['title']) for e in self.bob.get('/api/family/feed').json()['mine']],[('updated','Сериал')])
 
+    def test_watched_marks_are_personal_and_reset_by_new_episodes(self):
+        """«Просмотрено» у каждого своё; число досмотренных серий; новые серии снимают отметку тайтла."""
+        show='/media/tv/Show'
+        with portal.cache_db() as con:
+            con.execute('insert into account_watched values(?,?,?)',(self.ids['alice'],show,time.time()))
+            for n in (1,2):con.execute('insert into account_playback_history values(?,?,?,?,?,1,?,?)',(self.ids['alice'],f'{show}/e{n}.mkv',show,10,10,'s',time.time()))
+            con.commit()
+        def marks(login):
+            with portal.cache_db() as con:user=dict(con.execute('select * from accounts where login=?',(login,)).fetchone())
+            token=portal.AUTH_USER.set(user)
+            try:return [(x['played'],x['watchedCount']) for x in portal.family_view('tv',[{'path':show,'title':'Show'}],'family')]
+            finally:portal.AUTH_USER.reset(token)
+        self.assertEqual(marks('alice'),[(True,2)])
+        self.assertEqual(marks('bob'),[(False,0)])
+        self.assertEqual(self.as_user('alice',portal.family_mark_watched,[{'projectPath':show},{'title':'без пути'}])[0]['played'],True)
+        with portal.cache_db() as con:
+            portal.family_move(con,show,show+' (2020)');con.commit()
+            self.assertEqual(con.execute('select project from account_watched').fetchone()['project'],show+' (2020)')
+
     def test_personal_favorites_summary_owner_and_hidden(self):
         """Избранное у каждого своё; сводка семьи и смена автора — у админа; «скрыто от друзей» видно в карточке."""
         self.assertEqual(self.alice.post('/api/favorites',data={'kind':'movies','external_id':'1','title':'Дюна'}).status_code,200)

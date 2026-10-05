@@ -105,7 +105,15 @@ class AccountTests(unittest.TestCase):
             for client,position in [(self.admin,30),(self.user,80)]:
                 self.assertEqual(client.get('/api/player/resume').json()['items'][0]['position'],position)
                 self.assertEqual(client.get('/api/player/project',params={'path':str(self.project)}).json()['items'][0]['position'],position)
-        self.admin.post('/api/player/progress',data={'path':str(self.video),'position':900,'duration':1000})
+        # Досмотрена единственная серия — тайтл «просмотрен» у admin, но не у второго аккаунта.
+        with patch.object(portal,'library_files',AsyncMock(return_value=listing)):
+            self.assertEqual(self.admin.post('/api/player/progress',data={'path':str(self.video),'position':900,'duration':1000}).json()['played'],True)
+            self.assertEqual(self.admin.get('/api/player/project',params={'path':str(self.project)}).json()['played'],True)
+            self.assertEqual(self.user.get('/api/player/project',params={'path':str(self.project)}).json()['played'],False)
+            # Снять отметку с тайтла — серия снова не досмотрена.
+            self.assertEqual(self.admin.post('/api/player/watched',data={'path':str(self.project),'watched':0}).json()['played'],False)
+            self.assertEqual(self.admin.get('/api/player/project',params={'path':str(self.project)}).json()['items'][0]['completed'],False)
+            self.assertEqual(self.admin.post('/api/player/watched',data={'path':str(self.video),'watched':1}).json()['played'],True)
         self.assertEqual(self.admin.get('/api/player/resume').json()['items'],[])
         self.assertEqual(self.user.get('/api/player/resume').json()['items'][0]['position'],80)
 

@@ -29,6 +29,7 @@ class PlayerTests(unittest.TestCase):
         def db():
             con=sqlite3.connect(self.db,check_same_thread=False);con.row_factory=sqlite3.Row
             con.execute('create table if not exists account_playback_history(user_id integer,path text,project text,position real,duration real,completed integer,signature text,updated_at real,primary key(user_id,path))')
+            con.execute('create table if not exists account_watched(user_id integer,project text,created_at real,primary key(user_id,project))')
             con.execute('create table if not exists library_cache(path text,title text,poster text,kind text,has_file integer)');self.connections.append(con);return con
         self.scope=dict(Path=Path,re=re,time=time,asyncio=asyncio,shutil=shutil,subprocess=subprocess,json=json,os=os,hashlib=hashlib,quote=quote,
             HTTPException=HTTPException,Form=Form,Query=Query,FileResponse=FileResponse,Response=Response,StreamingResponse=StreamingResponse,
